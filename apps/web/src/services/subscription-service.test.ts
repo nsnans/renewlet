@@ -176,6 +176,36 @@ describe("subscription service API calls", () => {
     expect(page.nextCursor).toBe("next");
   });
 
+  it("serializes custom list filters as repeated product API query params", async () => {
+    mocks.apiFetch.mockResolvedValue({
+      subscriptions: [],
+      nextCursor: null,
+      total: 0,
+    });
+
+    await subscriptionService.listPage(null, 25, {
+      q: "cursor",
+      category: ["developer_tools", "ai"],
+      tag: ["Team"],
+      billingCycle: ["monthly"],
+      paymentMethod: ["paypal", "__none"],
+      currency: ["USD"],
+      status: "active",
+      renewal: "auto",
+      nextBillingFrom: "2999-08-01",
+      nextBillingTo: "2999-08-31",
+      pinned: true,
+      publicHidden: false,
+      reminderMode: "custom",
+      repeatReminder: true,
+    });
+
+    expect(mocks.apiFetch).toHaveBeenCalledWith(
+      "/api/app/subscriptions?limit=25&q=cursor&category=developer_tools&category=ai&tag=Team&billingCycle=monthly&paymentMethod=paypal&paymentMethod=__none&currency=USD&status=active&renewal=auto&nextBillingFrom=2999-08-01&nextBillingTo=2999-08-31&pinned=true&publicHidden=false&reminderMode=custom&repeatReminder=true",
+      expect.anything(),
+    );
+  });
+
   it("stops aggregate listing when the backend repeats a subscription cursor", async () => {
     const firstPageUrl = "/api/app/subscriptions?limit=50";
     const repeatedCursorUrl = "/api/app/subscriptions?limit=50&cursor=repeat";
@@ -221,6 +251,20 @@ describe("subscription service API calls", () => {
     expect(mocks.apiFetch.mock.calls[0]?.[2]).toMatchObject({ method: "POST" });
     expect(mocks.apiFetch.mock.calls[1]?.[0]).toBe("/api/app/subscriptions/sub_api");
     expect(mocks.apiFetch.mock.calls[1]?.[2]).toMatchObject({ method: "PATCH" });
+  });
+
+  it("patches quick-action fields without sending a full subscription snapshot", async () => {
+    mocks.apiFetch.mockResolvedValue({ subscription: { ...apiSubscription, pinned: true } });
+
+    await subscriptionService.patch("sub_api", { pinned: true });
+
+    const init = mocks.apiFetch.mock.calls[0]?.[2] as RequestInit | undefined;
+    const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(mocks.apiFetch.mock.calls[0]?.[0]).toBe("/api/app/subscriptions/sub_api");
+    expect(init).toMatchObject({ method: "PATCH" });
+    expect(payload).toEqual({ pinned: true });
+    expect(payload).not.toHaveProperty("name");
+    expect(payload).not.toHaveProperty("nextBillingDate");
   });
 
   it("renews with an explicit empty JSON object and deletes through the product API", async () => {

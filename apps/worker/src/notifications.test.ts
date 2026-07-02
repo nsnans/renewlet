@@ -40,6 +40,13 @@ type FakeSchedulerState = {
 function fakeEnv(handler: (query: FakeD1Query) => unknown | Promise<unknown>, options: { schedulerState?: FakeSchedulerState } = {}): Env {
   return {
     DB: {
+      async batch(statements: D1PreparedStatement[]) {
+        const results: D1Result[] = [];
+        for (const statement of statements) {
+          results.push(await statement.run());
+        }
+        return results;
+      },
       prepare(sql: string) {
         return {
           bind(...params: unknown[]) {
@@ -72,8 +79,28 @@ async function handleFakeD1(
       updated_at: "2026-01-01T00:00:00.000Z",
     };
   }
+  if (query.method === "first" && query.sql.includes("SUM(CASE WHEN auto_renew")) {
+    return {
+      auto_renew_count: state?.autoRenewCount ?? 0,
+      repeat_reminder_count: state?.repeatReminderCount ?? 0,
+    };
+  }
   if (query.method === "run" && query.sql.includes("subscription_scheduler_state")) {
     return d1Run(1);
+  }
+  if (query.method === "run" && (
+    query.sql.includes("subscription_list_index")
+    || query.sql.includes("subscription_tags")
+    || query.sql.includes("subscription_user_stats")
+  )) {
+    return d1Run(1);
+  }
+  if (query.method === "all" && query.params.length === 1 && query.sql.includes("FROM subscriptions") && query.sql.includes("WHERE user_id = ?") && query.sql.includes("ORDER BY created_at DESC, id DESC")) {
+    return d1All([]);
+  }
+  if (query.method === "all" && query.sql.includes("FROM subscription_scheduler_state AS scheduler")) {
+    const legacy = await handler({ sql: "SELECT id FROM users WHERE banned = 0", params: [], method: "all" }) as D1Result<{ id?: string; user_id?: string }>;
+    return d1All((legacy.results ?? []).map((row) => ({ user_id: row.user_id ?? row.id ?? "usr_due" })));
   }
   return await handler(query);
 }
@@ -274,7 +301,7 @@ describe("Cloudflare notifications", () => {
     expect(result.schedule).not.toHaveProperty("reason");
   });
 
-  it("normalizes legacy notification history schedules with decision fields", async () => {
+  it("drops legacy notification history results with internal decision fields", async () => {
     const legacyJob = notificationJobRow({
       status: "skipped",
       attempts: 1,
@@ -298,22 +325,13 @@ describe("Cloudflare notifications", () => {
       headers: { authorization: "Bearer test" },
     }), env);
     const body = await readSuccessData<{
-      summary: { latestJob: { result: { schedule: Record<string, unknown> } } | null };
-      history: { jobs: Array<{ result: { schedule: Record<string, unknown> } }> };
+      summary: { latestJob: { result: Record<string, unknown> } | null };
+      history: { jobs: Array<{ result: Record<string, unknown> }> };
     }>(response);
-    const latestSchedule = body.summary.latestJob?.result.schedule;
-    const historySchedule = body.history.jobs[0]?.result.schedule;
 
     expect(response.status).toBe(200);
-    expect(latestSchedule).toEqual({
-      scheduledLocalDate: "2026-01-09",
-      scheduledLocalTime: "08:00",
-      timeZone: "UTC",
-      scheduledInstantUtc: "2026-01-09T08:00:00Z",
-    });
-    expect(historySchedule).toEqual(latestSchedule);
-    expect(latestSchedule).not.toHaveProperty("due");
-    expect(latestSchedule).not.toHaveProperty("reason");
+    expect(body.summary.latestJob?.result).toEqual({});
+    expect(body.history.jobs[0]?.result).toEqual({});
   });
 
   it("logs and rejects top-level scheduled failures without leaking secrets", async () => {
@@ -329,8 +347,7 @@ describe("Cloudflare notifications", () => {
 
     expect(errorSpy).toHaveBeenCalledWith("scheduled_notifications_failed", expect.objectContaining({
       event: "scheduled_notifications_failed",
-      phase: "list_users",
-      offset: 0,
+      phase: "list_due_users",
       error: { name: "Error", message: "database is locked [redacted] Bearer [redacted]" },
     }));
   });
