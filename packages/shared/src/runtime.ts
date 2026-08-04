@@ -21,7 +21,7 @@ export const CUSTOM_CYCLE_UNITS = ["day", "week", "month", "year"] as const;
 export type CustomCycleUnit = (typeof CUSTOM_CYCLE_UNITS)[number];
 
 /** 通知渠道枚举同时约束设置 payload、cron result 和历史面板筛选。 */
-export const NOTIFICATION_CHANNELS = ["telegram", "notifyx", "webhook", "wechat", "email", "bark", "serverchan", "discord", "pushplus"] as const;
+export const NOTIFICATION_CHANNELS = ["telegram", "notifyx", "webhook", "dingtalk", "wechat", "email", "bark", "serverchan", "discord", "pushplus"] as const;
 export type NotificationChannel = (typeof NOTIFICATION_CHANNELS)[number];
 
 export const REPEAT_REMINDER_INTERVALS = ["1h", "3h", "6h", "12h", "24h"] as const;
@@ -30,7 +30,7 @@ export type RepeatReminderInterval = (typeof REPEAT_REMINDER_INTERVALS)[number];
 export const REPEAT_REMINDER_WINDOWS = ["24h", "48h", "72h", "full"] as const;
 export type RepeatReminderWindow = (typeof REPEAT_REMINDER_WINDOWS)[number];
 
-export const EXCHANGE_RATE_PROVIDERS = ["exchange-api", "floatrates"] as const;
+export const EXCHANGE_RATE_PROVIDERS = ["frankfurter", "floatrates", "exchange-api"] as const;
 export type ExchangeRateProvider = (typeof EXCHANGE_RATE_PROVIDERS)[number];
 
 /** 跨 Go/PocketBase、D1 和前端的 date-only 品牌类型，避免续费日期被误当成带时区 instant。 */
@@ -70,10 +70,10 @@ export function isValidTimeZone(value: string): boolean {
 }
 
 export function normalizeExchangeRateProvider(value: unknown): ExchangeRateProvider {
-  // frankfurter 是旧 UI 文案/缓存里的历史值；彻底切到 exchange-api 前先在边界归一。
-  if (value === "exchange-api" || value === "frankfurter") return "exchange-api";
+  if (value === "frankfurter") return "frankfurter";
   if (value === "floatrates") return "floatrates";
-  return "floatrates";
+  if (value === "exchange-api") return "exchange-api";
+  return "frankfurter";
 }
 
 export function isValidReminderDays(value: number): boolean {

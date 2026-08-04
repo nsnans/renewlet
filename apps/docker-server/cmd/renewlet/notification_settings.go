@@ -123,6 +123,9 @@ func mergeSettingsWithOptions(base appSettings, patch json.RawMessage, rejectUns
 	if len(bytes.TrimSpace(patch)) == 0 {
 		return base, nil
 	}
+	if !rejectUnsupportedLocale {
+		patch = normalizeRecoverableStoredSettingsPatch(patch)
+	}
 	settings := base
 	sourcePatch, err := decodeBuiltInIconSourcePatch(patch, base.Locale)
 	if err != nil {
@@ -143,6 +146,22 @@ func mergeSettingsWithOptions(base appSettings, patch json.RawMessage, rejectUns
 			return base, err
 		} else if ok && format != telegramMessageFormatPlain && format != telegramMessageFormatHTML {
 			return base, errors.New("TELEGRAM_MESSAGE_FORMAT_UNSUPPORTED")
+		}
+		// 钉钉 payload 结构由渠道发送器统一生成；写入边界只接受官方机器人支持的正文类型。
+		if messageType, ok, err := explicitSettingsStringPatch(patch, "dingtalkMessageType"); err != nil {
+			return base, err
+		} else if ok && messageType != dingtalkMessageTypeMarkdown && messageType != dingtalkMessageTypeText {
+			return base, errors.New("DINGTALK_MESSAGE_TYPE_UNSUPPORTED")
+		}
+		if titleTemplate, ok, err := explicitSettingsStringPatch(patch, "dingtalkTitleTemplate"); err != nil {
+			return base, err
+		} else if ok && runeCount(titleTemplate) > dingtalkTitleTemplateMaxRunes {
+			return base, errors.New("DINGTALK_TITLE_TEMPLATE_TOO_LONG")
+		}
+		if contentTemplate, ok, err := explicitSettingsStringPatch(patch, "dingtalkContentTemplate"); err != nil {
+			return base, err
+		} else if ok && runeCount(contentTemplate) > dingtalkContentTemplateMaxRunes {
+			return base, errors.New("DINGTALK_CONTENT_TEMPLATE_TOO_LONG")
 		}
 	}
 	settings.BuiltInIconSources = mergeBuiltInIconSourceSettings(base.BuiltInIconSources, sourcePatch)
@@ -172,17 +191,45 @@ func explicitSettingsStringPatch(raw json.RawMessage, key string) (string, bool,
 	return text, true, nil
 }
 
+func normalizeRecoverableStoredSettingsPatch(raw json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return raw
+	}
+	changed := false
+	normalizeTemplate := func(key string, maxRunes int) {
+		value, ok := fields[key]
+		if !ok {
+			return
+		}
+		var text string
+		if err := json.Unmarshal(value, &text); err != nil || runeCount(text) > maxRunes {
+			// 历史/手改 settings JSON 只清坏模板字段；写入路径仍由 strict decoder 和长度校验拒绝。
+			fields[key] = json.RawMessage(`""`)
+			changed = true
+		}
+	}
+	normalizeTemplate("dingtalkTitleTemplate", dingtalkTitleTemplateMaxRunes)
+	normalizeTemplate("dingtalkContentTemplate", dingtalkContentTemplateMaxRunes)
+	if !changed {
+		return raw
+	}
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return data
+}
+
 // sanitizeSettings 对可恢复的设置值做保守归一。
 // 注意： 这里只修复默认值/枚举兜底，不应吞掉 route body 的严格校验职责。
 func sanitizeSettings(settings appSettings) appSettings {
 	if !isSupportedAppLocale(settings.Locale) {
 		settings.Locale = string(normalizeAppLocale(settings.Locale))
 	}
-	if settings.ExchangeRateProvider == "frankfurter" {
-		settings.ExchangeRateProvider = "exchange-api"
-	}
-	if settings.ExchangeRateProvider != "floatrates" && settings.ExchangeRateProvider != "exchange-api" {
-		settings.ExchangeRateProvider = "floatrates"
+	if settings.ExchangeRateProvider != "frankfurter" && settings.ExchangeRateProvider != "floatrates" && settings.ExchangeRateProvider != "exchange-api" {
+		// 只有历史/手改坏库值回落到新默认；已保存的旧 provider 是用户选择，不能在读取时强迁移。
+		settings.ExchangeRateProvider = "frankfurter"
 	}
 	if settings.PublicStatusCurrency != "inherit" && !settingsCurrencyRe.MatchString(settings.PublicStatusCurrency) {
 		settings.PublicStatusCurrency = "inherit"
@@ -206,6 +253,15 @@ func sanitizeSettings(settings appSettings) appSettings {
 	}
 	settings.WebhookHeaders = clearLegacyWebhookExample(settings.WebhookHeaders, legacyWebhookHeadersExample)
 	settings.WebhookPayload = clearLegacyWebhookExample(settings.WebhookPayload, legacyWebhookPayloadExample)
+	if settings.DingTalkMessageType != dingtalkMessageTypeMarkdown && settings.DingTalkMessageType != dingtalkMessageTypeText {
+		settings.DingTalkMessageType = dingtalkMessageTypeMarkdown
+	}
+	if runeCount(settings.DingTalkTitleTemplate) > dingtalkTitleTemplateMaxRunes {
+		settings.DingTalkTitleTemplate = ""
+	}
+	if runeCount(settings.DingTalkContentTemplate) > dingtalkContentTemplateMaxRunes {
+		settings.DingTalkContentTemplate = ""
+	}
 	if settings.WechatMessageType != "markdown" && settings.WechatMessageType != "text" {
 		settings.WechatMessageType = "text"
 	}
@@ -213,6 +269,10 @@ func sanitizeSettings(settings appSettings) appSettings {
 		settings.BarkServerURL = "https://api.day.app"
 	}
 	return settings
+}
+
+func runeCount(value string) int {
+	return len([]rune(value))
 }
 
 func sanitizeBuiltInIconSources(settings builtInIconSourceSettings) builtInIconSourceSettings {

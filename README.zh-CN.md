@@ -37,7 +37,7 @@ Renewlet 是一个自托管订阅账本，用来记录周期扣费并发送续�
 
 - 订阅记录：扣费周期、状态、标签、网站、备注、Logo、分类和付款方式。
 - 续费提醒：按用户 IANA 时区、本地提醒时间、提前天数、重复提醒、发送历史和失败重试生成任务。
-- 通知渠道：Telegram、Notifyx、Webhook、企业微信机器人、SMTP 邮件、Bark、Server酱、Discord 和 PushPlus。
+- 通知渠道：Telegram、Notifyx、Webhook、企业微信机器人、钉钉机器人、SMTP 邮件、Bark、Server酱、Discord 和 PushPlus。
 - 账户安全：身份验证器验证码、一次性恢复码和通行密钥登录。
 - 支出统计：月/年成本折算、预算使用、分类图表、付款方式图表和停用订阅节省。
 - AI 识别：从账单截图、备忘录、CSV/TSV 或表格文本生成订阅草稿，确认后再导入。
@@ -70,7 +70,7 @@ http://localhost:3000/setup
 生产环境固定到稳定版本：
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.2.9"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.2.94"#' .env
 docker compose pull
 docker compose up -d
 ```
@@ -78,7 +78,7 @@ docker compose up -d
 如果 Docker Hub 拉取不可用，改用 GHCR：
 
 ```env
-RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.2.9"
+RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.2.94"
 ```
 
 ## Cloudflare Workers
@@ -100,7 +100,7 @@ tar -czf renewlet-backup-$(date +%F).tgz .env docker-compose.yml data
 使用 Docker Compose 升级：
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.2.9"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.2.94"#' .env
 docker compose pull
 docker compose up -d
 docker compose logs -f

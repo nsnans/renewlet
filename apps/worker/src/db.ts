@@ -1,5 +1,11 @@
 import { createDefaultAppSettings } from "@renewlet/shared/settings-defaults";
-import { appSettingsSchema, settingsUpdateBodySchema, type ApiAppSettings } from "@renewlet/shared/schemas/settings";
+import {
+  appSettingsSchema,
+  DINGTALK_CONTENT_TEMPLATE_MAX_LENGTH,
+  DINGTALK_TITLE_TEMPLATE_MAX_LENGTH,
+  settingsUpdateBodySchema,
+  type ApiAppSettings,
+} from "@renewlet/shared/schemas/settings";
 import { apiSubscriptionSchema, type ApiSubscription } from "@renewlet/shared/schemas/subscriptions";
 import { customConfigSchema } from "@renewlet/shared/schemas/custom-config";
 import { cleanBuiltInIconSourceSettingsPatch, mergeBuiltInIconSourceSettings } from "@renewlet/shared/built-in-icons";
@@ -283,10 +289,38 @@ export function normalizeSettingsJson(value: string): ApiAppSettings {
 
 function normalizeStoredSettingsPatch(value: unknown): unknown {
   if (!isRecord(value)) return value;
-  // 写入 API 仍严格拒绝非法值；读取坏库时只把 Telegram 样式降回 plain，不让整份 settings 掉默认。
+  // 写入 API 仍严格拒绝非法值；读取坏库时只修复可恢复字段，不让整份 settings 掉默认。
   const telegramMessageFormat = value["telegramMessageFormat"];
-  if (telegramMessageFormat === undefined || telegramMessageFormat === "plain" || telegramMessageFormat === "html") return value;
-  return { ...value, telegramMessageFormat: "plain" };
+  const dingtalkMessageType = value["dingtalkMessageType"];
+  const dingtalkTitleTemplate = value["dingtalkTitleTemplate"];
+  const dingtalkContentTemplate = value["dingtalkContentTemplate"];
+  return {
+    ...value,
+    ...(
+      telegramMessageFormat === undefined || telegramMessageFormat === "plain" || telegramMessageFormat === "html"
+        ? {}
+        : { telegramMessageFormat: "plain" }
+    ),
+    ...(
+      dingtalkMessageType === undefined || dingtalkMessageType === "markdown" || dingtalkMessageType === "text"
+        ? {}
+        : { dingtalkMessageType: "markdown" }
+    ),
+    ...(
+      typeof dingtalkTitleTemplate === "string" && codePointLength(dingtalkTitleTemplate) <= DINGTALK_TITLE_TEMPLATE_MAX_LENGTH
+        ? {}
+        : { dingtalkTitleTemplate: "" }
+    ),
+    ...(
+      typeof dingtalkContentTemplate === "string" && codePointLength(dingtalkContentTemplate) <= DINGTALK_CONTENT_TEMPLATE_MAX_LENGTH
+        ? {}
+        : { dingtalkContentTemplate: "" }
+    ),
+  };
+}
+
+function codePointLength(value: string): number {
+  return Array.from(value).length;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
