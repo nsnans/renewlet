@@ -9,7 +9,9 @@ import {
 import { apiSubscriptionSchema, type ApiSubscription } from "@renewlet/shared/schemas/subscriptions";
 import { customConfigSchema } from "@renewlet/shared/schemas/custom-config";
 import { cleanBuiltInIconSourceSettingsPatch, mergeBuiltInIconSourceSettings } from "@renewlet/shared/built-in-icons";
+import { cleanOnlineIconSourceSettingsPatch, mergeOnlineIconSourceSettings } from "@renewlet/shared/online-icon-sources";
 import { DISABLED_REMINDER_DAYS, MAX_REMINDER_DAYS } from "@renewlet/shared/runtime";
+import { moneyFromUnknown } from "@renewlet/shared/money";
 import type { AdminUser } from "@renewlet/shared/schemas/admin";
 import type { AssetInUseDetails } from "@renewlet/shared/schemas/media";
 import type { z } from "zod";
@@ -269,6 +271,7 @@ export function mergeSettingsPatch(current: ApiAppSettings, patch: ApiAppSetting
       ...patch.aiRecognition,
     },
     builtInIconSources: mergeBuiltInIconSourceSettings(current.builtInIconSources, cleanBuiltInIconSourceSettingsPatch(patch.builtInIconSources)),
+    onlineIconSources: mergeOnlineIconSourceSettings(current.onlineIconSources, cleanOnlineIconSourceSettingsPatch(patch.onlineIconSources)),
   });
 }
 
@@ -294,8 +297,18 @@ function normalizeStoredSettingsPatch(value: unknown): unknown {
   const dingtalkMessageType = value["dingtalkMessageType"];
   const dingtalkTitleTemplate = value["dingtalkTitleTemplate"];
   const dingtalkContentTemplate = value["dingtalkContentTemplate"];
+  const subscriptionPriceReferenceCurrency = value["subscriptionPriceReferenceCurrency"];
+  const monthlyBudget = moneyFromUnknown(value["monthlyBudget"]);
   return {
     ...value,
+    ...(monthlyBudget ? { monthlyBudget } : {}),
+    ...(
+      subscriptionPriceReferenceCurrency === undefined
+      || subscriptionPriceReferenceCurrency === "default"
+      || (typeof subscriptionPriceReferenceCurrency === "string" && /^[A-Z]{3}$/.test(subscriptionPriceReferenceCurrency))
+        ? {}
+        : { subscriptionPriceReferenceCurrency: "default" }
+    ),
     ...(
       telegramMessageFormat === undefined || telegramMessageFormat === "plain" || telegramMessageFormat === "html"
         ? {}
@@ -361,7 +374,7 @@ export function toApiSubscription(row: SubscriptionRow): ApiSubscription {
     id: row.id,
     name: row.name,
     ...(row.logo ? { logo: row.logo } : {}),
-    price: row.price,
+    price: moneyFromUnknown(row.price) ?? "0",
     currency: row.currency,
     billingCycle: row.billing_cycle,
     ...(row.custom_days === null ? {} : { customDays: row.custom_days }),

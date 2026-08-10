@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { mergeOnlineIconSourceSettings } from "../online-icon-sources";
 import { createDefaultAppSettings } from "../settings-defaults";
 import { appSettingsSchema, settingsUpdateBodySchema } from "./settings";
 
@@ -10,6 +11,90 @@ describe("settings schema", () => {
     expect(settingsUpdateBodySchema.parse({ exchangeRateProvider: "floatrates" }).exchangeRateProvider).toBe("floatrates");
     expect(settingsUpdateBodySchema.parse({ exchangeRateProvider: "exchange-api" }).exchangeRateProvider).toBe("exchange-api");
     expect(settingsUpdateBodySchema.parse({ exchangeRateProvider: "unknown" }).exchangeRateProvider).toBe("frankfurter");
+  });
+
+  it("keeps subscription price reference disabled by default and validates its target currency", () => {
+    const defaults = createDefaultAppSettings();
+    expect(defaults.subscriptionPriceReferenceEnabled).toBe(false);
+    expect(defaults.subscriptionPriceReferenceCurrency).toBe("default");
+
+    expect(settingsUpdateBodySchema.parse({
+      subscriptionPriceReferenceEnabled: true,
+      subscriptionPriceReferenceCurrency: "USD",
+    })).toMatchObject({
+      subscriptionPriceReferenceEnabled: true,
+      subscriptionPriceReferenceCurrency: "USD",
+    });
+    expect(settingsUpdateBodySchema.parse({ subscriptionPriceReferenceCurrency: "default" }).subscriptionPriceReferenceCurrency).toBe("default");
+    expect(settingsUpdateBodySchema.safeParse({ subscriptionPriceReferenceCurrency: "usd" }).success).toBe(false);
+    expect(settingsUpdateBodySchema.safeParse({ subscriptionPriceReferenceCurrency: "USDT" }).success).toBe(false);
+    expect(settingsUpdateBodySchema.safeParse({ subscriptionPriceReferenceEnabled: "true" }).success).toBe(false);
+  });
+
+  it("accepts online App icon source settings with App Store enabled by default", () => {
+    const defaults = createDefaultAppSettings();
+    expect(defaults.onlineIconSources.appStore.enabled).toBe(true);
+    expect(defaults.onlineIconSources.appStore.storefronts).toEqual(["us"]);
+
+    expect(settingsUpdateBodySchema.parse({
+      onlineIconSources: {
+        appStore: { enabled: false },
+      },
+    }).onlineIconSources).toEqual({
+      appStore: { enabled: false },
+    });
+    expect(settingsUpdateBodySchema.parse({
+      onlineIconSources: {
+        appStore: { storefronts: ["cn"] },
+      },
+    }).onlineIconSources).toEqual({
+      appStore: { storefronts: ["cn"] },
+    });
+    expect(settingsUpdateBodySchema.parse({
+      onlineIconSources: {
+        appStore: { storefronts: ["cn", "us"] },
+      },
+    }).onlineIconSources).toEqual({
+      appStore: { storefronts: ["us", "cn"] },
+    });
+    expect(settingsUpdateBodySchema.parse({
+      onlineIconSources: {
+        appStore: {},
+      },
+    }).onlineIconSources).toEqual({
+      appStore: {},
+    });
+    expect(settingsUpdateBodySchema.safeParse({
+      onlineIconSources: {
+        appStore: { enabled: true, variantsEnabled: true },
+      },
+    }).success).toBe(false);
+    expect(settingsUpdateBodySchema.safeParse({
+      onlineIconSources: {
+        appStore: { storefronts: [] },
+      },
+    }).success).toBe(false);
+    expect(settingsUpdateBodySchema.safeParse({
+      onlineIconSources: {
+        appStore: { storefronts: ["us", "us"] },
+      },
+    }).success).toBe(false);
+    expect(settingsUpdateBodySchema.safeParse({
+      onlineIconSources: {
+        appStore: { storefronts: ["jp"] },
+      },
+    }).success).toBe(false);
+    expect(settingsUpdateBodySchema.safeParse({
+      onlineIconSources: {
+        googlePlay: { enabled: true },
+      },
+    }).success).toBe(false);
+
+    expect(mergeOnlineIconSourceSettings({
+      appStore: { enabled: true, storefronts: ["cn"] },
+    }, {
+      appStore: { enabled: false },
+    }).appStore).toEqual({ enabled: false, storefronts: ["cn"] });
   });
 
   it("supports only plain or html Telegram message formats", () => {

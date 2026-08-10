@@ -6,6 +6,12 @@ import {
   type BuiltInIconSourceSettingsPatch,
 } from "../built-in-icons";
 import {
+  APP_STORE_STOREFRONTS,
+  normalizeAppStoreStorefronts,
+  type OnlineIconSourceSettings,
+  type OnlineIconSourceSettingsPatch,
+} from "../online-icon-sources";
+import {
   NOTIFICATION_CHANNELS,
   MAX_REMINDER_DAYS,
   SUPPORTED_LOCALES,
@@ -19,6 +25,7 @@ import {
 import { aiRecognitionSettingsSchema } from "./ai-recognition";
 import { apiSuccessResponseSchema } from "./api";
 import { exchangeRateProviderSchema } from "./exchange-rates";
+import { moneyStringSchema } from "../money";
 
 const hhmmSchema = z.string().refine(isValidLocalTime, "时间格式必须为 HH:mm").transform((value) => value as LocalTime);
 
@@ -44,6 +51,10 @@ export const publicStatusCurrencySchema = z.union([
   z.literal("inherit"),
   z.string().trim().regex(/^[A-Z]{3}$/),
 ]);
+export const subscriptionPriceReferenceCurrencySchema = z.union([
+  z.literal("default"),
+  z.string().trim().regex(/^[A-Z]{3}$/),
+]);
 // Telegram 菜单命令描述不支持富文本；这个枚举只控制 sendMessage 正文，默认值在 shared defaults 固定为 plain。
 export const telegramMessageFormatSchema = z.enum(["plain", "html"]);
 export const dingtalkMessageTypeSchema = z.enum(["markdown", "text"]);
@@ -60,6 +71,17 @@ const builtInIconSourceSettingSchema = z.object({
 }).strict();
 // PATCH 允许局部更新 provider 开关，但最终 settings 必须仍至少保留一个可用来源。
 const builtInIconSourceSettingPatchSchema = builtInIconSourceSettingSchema.partial().strict();
+// storefronts 不是关闭语义；关闭 App Store 来源只能写 enabled=false，空数组必须在写入边界失败。
+const appStoreStorefrontsSchema = z.array(z.enum(APP_STORE_STOREFRONTS))
+  .min(1)
+  .max(APP_STORE_STOREFRONTS.length)
+  .refine((value) => new Set(value).size === value.length, "App Store 地区不能重复")
+  .transform((value) => normalizeAppStoreStorefronts(value));
+const onlineIconSourceSettingSchema = z.object({
+  enabled: z.boolean(),
+  storefronts: appStoreStorefrontsSchema,
+}).strict();
+const onlineIconSourceSettingPatchSchema = onlineIconSourceSettingSchema.partial().strict();
 
 export const builtInIconProviderSchema = z.enum(BUILT_IN_ICON_PROVIDERS);
 
@@ -71,6 +93,10 @@ export const builtInIconSourcesSchema = z.object({
   (value) => hasEnabledBuiltInIconSource(value satisfies BuiltInIconSourceSettings),
   "至少启用一个内置图标来源",
 );
+
+export const onlineIconSourcesSchema = z.object({
+  appStore: onlineIconSourceSettingSchema,
+}).strict();
 
 const appSettingsShape = {
   adminUsername: z.string().trim().min(1).max(80),
@@ -85,9 +111,13 @@ const appSettingsShape = {
   showExpired: z.boolean(),
   defaultCurrency: z.string().trim().regex(/^[A-Z]{3}$/),
   publicStatusCurrency: publicStatusCurrencySchema,
+  // 单订阅参考价由 enabled 控制展示；currency 只保存跟随统计货币或 ISO 代码，是否支持/启用由前端选项和汇率 helper 再收敛。
+  subscriptionPriceReferenceEnabled: z.boolean(),
+  subscriptionPriceReferenceCurrency: subscriptionPriceReferenceCurrencySchema,
   exchangeRateProvider: z.preprocess(normalizeExchangeRateProvider, exchangeRateProviderSchema),
   builtInIconSources: builtInIconSourcesSchema,
-  monthlyBudget: z.number().finite().nonnegative().max(1_000_000_000),
+  onlineIconSources: onlineIconSourcesSchema,
+  monthlyBudget: moneyStringSchema,
   timezone: timezoneSchema,
   notificationTimeLocal: hhmmSchema,
   notificationReminderDays: globalReminderDaysSchema,
@@ -143,6 +173,11 @@ const builtInIconSourcesPatchSchema = z.object({
   dashboardIcons: builtInIconSourceSettingPatchSchema,
 }).partial().strict();
 export type ApiBuiltInIconSourceSettingsPatch = BuiltInIconSourceSettingsPatch;
+const onlineIconSourcesPatchSchema = z.object({
+  appStore: onlineIconSourceSettingPatchSchema,
+}).partial().strict();
+export type ApiOnlineIconSourceSettings = OnlineIconSourceSettings;
+export type ApiOnlineIconSourceSettingsPatch = OnlineIconSourceSettingsPatch;
 
 /**
  * 设置读取响应的完整形状。
@@ -160,11 +195,12 @@ export const settingsResponseSchema = apiSuccessResponseSchema(settingsPayloadSc
 /**
  * 设置 PATCH 请求允许局部字段，但不允许未知字段。
  *
- * builtInIconSources 额外允许按 provider 局部更新，最终完整设置仍由 appSettingsSchema 兜底。
+ * builtInIconSources/onlineIconSources 额外允许按来源局部更新，最终完整设置仍由 appSettingsSchema 兜底。
  */
 export const settingsUpdateBodySchema = z.object({
   ...appSettingsShape,
   builtInIconSources: builtInIconSourcesPatchSchema,
+  onlineIconSources: onlineIconSourcesPatchSchema,
 }).partial().strict();
 export type ApiAppSettings = z.infer<typeof appSettingsSchema>;
 export type SettingsResponse = z.infer<typeof settingsPayloadSchema>;

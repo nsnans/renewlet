@@ -57,9 +57,10 @@ type healthResponse struct {
 // appStatusResponse 是认证前 capability 真相源。
 // 登录页、setup 页和设置页 demo 限制都从这里读取；真正写入仍由各 route/hook 再次校验。
 type appStatusResponse struct {
-	SetupRequired bool `json:"setupRequired"`
-	SetupEnabled  bool `json:"setupEnabled"`
-	DemoMode      bool `json:"demoMode"`
+	SetupRequired bool                  `json:"setupRequired"`
+	SetupEnabled  bool                  `json:"setupEnabled"`
+	DemoMode      bool                  `json:"demoMode"`
+	Turnstile     turnstilePublicConfig `json:"turnstile"`
 }
 
 // setupStatusResponse 描述旧 setup 入口是否可用。
@@ -86,14 +87,15 @@ type authUserResponse struct {
 }
 
 type appSessionTokenResponse struct {
-	ID        string `json:"id"`
 	ExpiresAt string `json:"expiresAt"`
 }
 
 type sessionResponse struct {
-	Type    string                  `json:"type"`
-	Session appSessionTokenResponse `json:"session"`
-	User    authUserResponse        `json:"user"`
+	Type      string                  `json:"type"`
+	Session   appSessionTokenResponse `json:"session"`
+	User      authUserResponse        `json:"user"`
+	token     string
+	csrfToken string
 }
 
 type mfaRequiredResponse struct {
@@ -122,6 +124,8 @@ type mfaRecoveryCodesResponse struct {
 	Session       appSessionTokenResponse `json:"session"`
 	User          authUserResponse        `json:"user"`
 	RecoveryCodes []string                `json:"recoveryCodes"`
+	token         string
+	csrfToken     string
 }
 
 type passkeyResponse struct {
@@ -143,11 +147,14 @@ type passkeyWebAuthnOptionsResponse struct {
 type loginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	// turnstileToken 只保护邮箱密码登录提交；Passkey、MFA 二阶段和首次 setup 不能复用这个字段。
+	TurnstileToken string `json:"turnstileToken,omitempty"`
 }
 
 func (r *loginRequest) Validate(locale appLocale) error {
 	r.Email = strings.TrimSpace(r.Email)
-	if !isValidEmailAddress(r.Email) || r.Password == "" || len(r.Password) > 72 {
+	r.TurnstileToken = strings.TrimSpace(r.TurnstileToken)
+	if !isValidEmailAddress(r.Email) || r.Password == "" || len(r.Password) > 72 || len(r.TurnstileToken) > 2048 {
 		return errors.New(serverText(locale, "auth.invalidEmailOrPassword"))
 	}
 	return nil
@@ -462,15 +469,15 @@ type builtInIconIndexProviderCheckResponse struct {
 }
 
 type builtInIconRefreshJobResponse struct {
-	ID           string  `json:"id"`
-	Provider     string  `json:"provider"`
-	Status       string  `json:"status"`
-	QueuedAt     string  `json:"queuedAt"`
-	StartedAt    *string `json:"startedAt"`
-	FinishedAt   *string `json:"finishedAt"`
-	Attempts     int     `json:"attempts"`
-	Error        *string `json:"error"`
-	IndexHash    *string `json:"indexHash"`
+	ID         string  `json:"id"`
+	Provider   string  `json:"provider"`
+	Status     string  `json:"status"`
+	QueuedAt   string  `json:"queuedAt"`
+	StartedAt  *string `json:"startedAt"`
+	FinishedAt *string `json:"finishedAt"`
+	Attempts   int     `json:"attempts"`
+	Error      *string `json:"error"`
+	IndexHash  *string `json:"indexHash"`
 }
 
 type builtInIconIndexProviderRefreshResponse struct {
@@ -540,9 +547,10 @@ type mediaCandidate struct {
 
 // mediaCandidateGroup 按来源分组；best 只指向分组中的首选候选，不额外生成第三类结果。
 type mediaCandidateGroup struct {
-	Best    *mediaCandidate  `json:"best"`
-	BuiltIn []mediaCandidate `json:"builtIn"`
-	Favicon []mediaCandidate `json:"favicon"`
+	Best     *mediaCandidate  `json:"best"`
+	BuiltIn  []mediaCandidate `json:"builtIn"`
+	AppStore []mediaCandidate `json:"appStore"`
+	Favicon  []mediaCandidate `json:"favicon"`
 }
 
 // mediaCandidateResolveItemResponse 是单条解析响应。
