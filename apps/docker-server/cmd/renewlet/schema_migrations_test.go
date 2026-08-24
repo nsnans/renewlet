@@ -5,10 +5,13 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
+	"github.com/pocketbase/pocketbase/tools/types"
 )
 
 func TestEnsureSchemaNoopDoesNotResaveCollections(t *testing.T) {
@@ -27,6 +30,59 @@ func TestEnsureSchemaNoopDoesNotResaveCollections(t *testing.T) {
 	}
 	if updates != 0 {
 		t.Fatalf("second ensureSchema saved %d collections, want 0", updates)
+	}
+}
+
+func TestSubscriptionDerivedSchemaRejectsWrongIndexDirection(t *testing.T) {
+	app := newSchemaTestApp(t)
+	if err := ensureSchema(app); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.DB().NewQuery("DROP INDEX idx_subscription_list_index_user_order").Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.DB().NewQuery(`CREATE INDEX idx_subscription_list_index_user_order
+		ON subscription_list_index (user_id, created_at, subscription_id)`).Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	current, err := subscriptionDerivedSchemaCurrent(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current {
+		t.Fatal("ASC list index must not satisfy the DESC derived schema signature")
+	}
+}
+
+func TestSubscriptionDerivedSchemaRejectsMissingStatsChecks(t *testing.T) {
+	app := newSchemaTestApp(t)
+	if err := ensureSchema(app); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.DB().NewQuery("DROP TABLE subscription_user_stats").Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.DB().NewQuery(`CREATE TABLE subscription_user_stats (
+		user_id TEXT PRIMARY KEY,
+		total_count INTEGER NOT NULL DEFAULT 0,
+		trial_count INTEGER NOT NULL DEFAULT 0,
+		active_count INTEGER NOT NULL DEFAULT 0,
+		expired_count INTEGER NOT NULL DEFAULT 0,
+		paused_count INTEGER NOT NULL DEFAULT 0,
+		cancelled_count INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL DEFAULT ''
+	)`).Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	current, err := subscriptionDerivedSchemaCurrent(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current {
+		t.Fatal("stats table without non-negative and status-sum checks must be rebuilt")
 	}
 }
 
@@ -100,7 +156,7 @@ func TestSchemaDataMigrationsBackfillSchedulerWithoutListProjection(t *testing.T
 	if projection.Count != 0 {
 		t.Fatalf("list projection count after startup migrations = %d, want 0", projection.Count)
 	}
-	if err := ensureSubscriptionListStateFresh(app, user.Id); err != nil {
+	if err := rebuildSubscriptionDerivedStateForUser(app, user.Id, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.DB().NewQuery("SELECT COUNT(*) AS count FROM subscription_list_index WHERE user_id = {:user}").
@@ -110,6 +166,113 @@ func TestSchemaDataMigrationsBackfillSchedulerWithoutListProjection(t *testing.T
 	}
 	if projection.Count != 1 {
 		t.Fatalf("list projection count after lazy refresh = %d, want 1", projection.Count)
+	}
+}
+
+func TestSchemaDataMigrationsNormalizeSubscriptionCycleFieldsOnce(t *testing.T) {
+	app := newSchemaTestApp(t)
+	if err := ensureCollectionsSchema(app); err != nil {
+		t.Fatal(err)
+	}
+	user := createSchemaTestUser(t, app, "schema-cycle-fields@example.com")
+	custom := createSchemaTestSubscriptionNoValidate(t, app, user.Id, map[string]interface{}{
+		"name":            "Legacy Custom",
+		"billingCycle":    "custom",
+		"customDays":      45,
+		"customCycleUnit": "",
+	})
+	fixed := createSchemaTestSubscriptionNoValidate(t, app, user.Id, map[string]interface{}{
+		"name":             "Fixed With Stale Fields",
+		"billingCycle":     "monthly",
+		"customDays":       30,
+		"customCycleUnit":  "week",
+		"oneTimeTermCount": 6,
+		"oneTimeTermUnit":  "month",
+	})
+
+	if err := runSchemaDataMigrations(app); err != nil {
+		t.Fatal(err)
+	}
+	reloadedCustom, err := app.FindRecordById("subscriptions", custom.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadedCustom.GetInt("customDays") != 45 || reloadedCustom.GetString("customCycleUnit") != "day" {
+		t.Fatalf("custom cycle = (%d, %q), want (45, day)", reloadedCustom.GetInt("customDays"), reloadedCustom.GetString("customCycleUnit"))
+	}
+	reloadedFixed, err := app.FindRecordById("subscriptions", fixed.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadedFixed.GetInt("customDays") != 0 || reloadedFixed.GetString("customCycleUnit") != "" || reloadedFixed.GetInt("oneTimeTermCount") != 0 || reloadedFixed.GetString("oneTimeTermUnit") != "" {
+		t.Fatalf("fixed cycle retained mutually exclusive fields: custom=(%d, %q) one-time=(%d, %q)", reloadedFixed.GetInt("customDays"), reloadedFixed.GetString("customCycleUnit"), reloadedFixed.GetInt("oneTimeTermCount"), reloadedFixed.GetString("oneTimeTermUnit"))
+	}
+}
+
+func TestSchemaDataMigrationsBackfillCostSharingCollectionReminderMirrors(t *testing.T) {
+	app := newSchemaTestApp(t)
+	if err := ensureCollectionsSchema(app); err != nil {
+		t.Fatal(err)
+	}
+	user := createSchemaTestUser(t, app, "schema-cost-sharing-backfill@example.com")
+	record := createSchemaTestSubscriptionNoValidate(t, app, user.Id, map[string]interface{}{
+		"name":         "Legacy Family Collection",
+		"startDate":    "2026-05-14",
+		"reminderDays": disabledReminderDays,
+		"costSharing": types.JSONRaw(`{
+			"enabled": true,
+			"splitMode": "equal",
+			"collectionReminder": {"enabled": true, "intervalMonths": 1, "reminderDays": -1},
+			"members": [{"id": "partner", "name": "Partner", "currency": "USD"}]
+		}`),
+	})
+	buyout := createSchemaTestSubscriptionNoValidate(t, app, user.Id, map[string]interface{}{
+		"name":            "Legacy Buyout Collection",
+		"billingCycle":    "one-time",
+		"startDate":       "2026-05-14",
+		"nextBillingDate": "2026-05-14",
+		"reminderDays":    disabledReminderDays,
+		"costSharing": types.JSONRaw(`{
+			"enabled": true,
+			"splitMode": "equal",
+			"collectionReminder": {"enabled": true, "intervalMonths": 1, "reminderDays": -1},
+			"members": [{"id": "partner", "name": "Partner", "currency": "USD"}]
+		}`),
+	})
+
+	if err := runSchemaDataMigrations(app); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := app.FindRecordById("subscriptions", record.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.GetBool("costSharingCollectionReminderEnabled") || reloaded.GetString("costSharingNextCollectionReminderDate") == "" {
+		t.Fatalf("expected collection reminder mirror backfill, enabled=%v next=%q", reloaded.GetBool("costSharingCollectionReminderEnabled"), reloaded.GetString("costSharingNextCollectionReminderDate"))
+	}
+	reloadedBuyout, err := app.FindRecordById("subscriptions", buyout.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadedBuyout.GetBool("costSharingCollectionReminderEnabled") || reloadedBuyout.GetString("costSharingNextCollectionReminderDate") != "" {
+		t.Fatalf("expected buyout collection mirror disabled, enabled=%v next=%q", reloadedBuyout.GetBool("costSharingCollectionReminderEnabled"), reloadedBuyout.GetString("costSharingNextCollectionReminderDate"))
+	}
+	data, err := jsonBytesFromValue(reloaded.Get("costSharing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "collectionReminder") {
+		t.Fatalf("expected public costSharing JSON to remain intact, got %s", data)
+	}
+	if strings.Contains(string(data), "intervalMonths") {
+		t.Fatalf("expected deprecated collection interval to be removed, got %s", data)
+	}
+	buyoutData, err := jsonBytesFromValue(reloadedBuyout.Get("costSharing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(buyoutData), "intervalMonths") {
+		t.Fatalf("expected deprecated buyout collection interval to be removed, got %s", buyoutData)
 	}
 }
 

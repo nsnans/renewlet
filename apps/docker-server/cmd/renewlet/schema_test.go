@@ -31,37 +31,39 @@ func TestEnsureSchemaCreatesContractFieldsAndIndexes(t *testing.T) {
 	}
 
 	assertFields(t, app, "subscriptions", map[string]string{
-		"user":                         core.FieldTypeRelation,
-		"name":                         core.FieldTypeText,
-		"logo":                         core.FieldTypeText,
-		"price":                        core.FieldTypeText,
-		"currency":                     core.FieldTypeText,
-		"billingCycle":                 core.FieldTypeSelect,
-		"customDays":                   core.FieldTypeNumber,
-		"customCycleUnit":              core.FieldTypeSelect,
-		"oneTimeTermCount":             core.FieldTypeNumber,
-		"oneTimeTermUnit":              core.FieldTypeSelect,
-		"category":                     core.FieldTypeText,
-		"status":                       core.FieldTypeSelect,
-		"pinned":                       core.FieldTypeBool,
-		"publicHidden":                 core.FieldTypeBool,
-		"paymentMethod":                core.FieldTypeText,
-		"startDate":                    core.FieldTypeText,
-		"nextBillingDate":              core.FieldTypeText,
-		"autoRenew":                    core.FieldTypeBool,
-		"autoCalculateNextBillingDate": core.FieldTypeBool,
-		"trialEndDate":                 core.FieldTypeText,
-		"website":                      core.FieldTypeURL,
-		"notes":                        core.FieldTypeText,
-		"tags":                         core.FieldTypeJSON,
-		"costSharing":                  core.FieldTypeJSON,
-		"extra":                        core.FieldTypeJSON,
-		"reminderDays":                 core.FieldTypeNumber,
-		"repeatReminderEnabled":        core.FieldTypeBool,
-		"repeatReminderInterval":       core.FieldTypeSelect,
-		"repeatReminderWindow":         core.FieldTypeSelect,
-		"created":                      core.FieldTypeAutodate,
-		"updated":                      core.FieldTypeAutodate,
+		"user":                                  core.FieldTypeRelation,
+		"name":                                  core.FieldTypeText,
+		"logo":                                  core.FieldTypeText,
+		"price":                                 core.FieldTypeText,
+		"currency":                              core.FieldTypeText,
+		"billingCycle":                          core.FieldTypeSelect,
+		"customDays":                            core.FieldTypeNumber,
+		"customCycleUnit":                       core.FieldTypeSelect,
+		"oneTimeTermCount":                      core.FieldTypeNumber,
+		"oneTimeTermUnit":                       core.FieldTypeSelect,
+		"category":                              core.FieldTypeText,
+		"status":                                core.FieldTypeSelect,
+		"pinned":                                core.FieldTypeBool,
+		"publicHidden":                          core.FieldTypeBool,
+		"paymentMethod":                         core.FieldTypeText,
+		"startDate":                             core.FieldTypeText,
+		"nextBillingDate":                       core.FieldTypeText,
+		"autoRenew":                             core.FieldTypeBool,
+		"autoCalculateNextBillingDate":          core.FieldTypeBool,
+		"trialEndDate":                          core.FieldTypeText,
+		"website":                               core.FieldTypeURL,
+		"notes":                                 core.FieldTypeText,
+		"tags":                                  core.FieldTypeJSON,
+		"costSharing":                           core.FieldTypeJSON,
+		"costSharingCollectionReminderEnabled":  core.FieldTypeBool,
+		"costSharingNextCollectionReminderDate": core.FieldTypeText,
+		"extra":                                 core.FieldTypeJSON,
+		"reminderDays":                          core.FieldTypeNumber,
+		"repeatReminderEnabled":                 core.FieldTypeBool,
+		"repeatReminderInterval":                core.FieldTypeSelect,
+		"repeatReminderWindow":                  core.FieldTypeSelect,
+		"created":                               core.FieldTypeAutodate,
+		"updated":                               core.FieldTypeAutodate,
 	})
 	assertFields(t, app, "settings", map[string]string{
 		"user":     core.FieldTypeRelation,
@@ -106,6 +108,7 @@ func TestEnsureSchemaCreatesContractFieldsAndIndexes(t *testing.T) {
 	})
 	assertTextFieldRequired(t, app, "subscriptions", "price", true)
 	assertNumberField(t, app, "subscriptions", "reminderDays", false, disabledReminderDays, maxReminderDays)
+	assertTextFieldRequired(t, app, "subscriptions", "costSharingNextCollectionReminderDate", false)
 	assertTextFieldRequired(t, app, "subscriptions", "startDate", false)
 	assertSelectFieldValues(t, app, "subscriptions", "billingCycle", "weekly", "monthly", "quarterly", "semi-annual", "annual", "custom", "one-time")
 	assertSelectFieldValues(t, app, "subscriptions", "customCycleUnit", "day", "week", "month", "year")
@@ -228,6 +231,7 @@ func TestEnsureSchemaCreatesContractFieldsAndIndexes(t *testing.T) {
 	assertIndex(t, app, "subscriptions", "idx_subscriptions_user_trial_reminder")
 	assertIndex(t, app, "subscriptions", "idx_subscriptions_user_repeat_reminder")
 	assertIndex(t, app, "subscriptions", "idx_subscriptions_user_repeat_trial_reminder")
+	assertIndex(t, app, "subscriptions", "idx_subscriptions_user_cost_sharing_collection_due")
 	assertIndex(t, app, "subscriptions", "idx_subscriptions_user_category_order")
 	assertIndex(t, app, "subscriptions", "idx_subscriptions_user_billing_cycle_order")
 	assertIndex(t, app, "subscriptions", "idx_subscriptions_user_currency_order")
@@ -241,6 +245,7 @@ func TestEnsureSchemaCreatesContractFieldsAndIndexes(t *testing.T) {
 	assertIndexDefinition(t, app, "subscriptions", "idx_subscriptions_user_trial_reminder", "user, trialEndDate, id")
 	assertIndexDefinition(t, app, "subscriptions", "idx_subscriptions_user_repeat_reminder", "user, repeatReminderEnabled, nextBillingDate, id")
 	assertIndexDefinition(t, app, "subscriptions", "idx_subscriptions_user_repeat_trial_reminder", "user, repeatReminderEnabled, status, trialEndDate, id")
+	assertIndexDefinition(t, app, "subscriptions", "idx_subscriptions_user_cost_sharing_collection_due", "user, costSharingCollectionReminderEnabled, costSharingNextCollectionReminderDate, id")
 	assertIndexDefinition(t, app, "subscriptions", "idx_subscriptions_user_category_order", "user, category, created, id")
 	assertIndexDefinition(t, app, "subscriptions", "idx_subscriptions_user_billing_cycle_order", "user, billingCycle, created, id")
 	assertIndexDefinition(t, app, "subscriptions", "idx_subscriptions_user_currency_order", "user, currency, created, id")
@@ -257,6 +262,7 @@ func TestEnsureSchemaCreatesContractFieldsAndIndexes(t *testing.T) {
 	assertIndex(t, app, "calendar_feeds", "idx_calendar_feeds_user_all_unique")
 	assertIndex(t, app, "calendar_feeds", "idx_calendar_feeds_token_unique")
 	assertIndex(t, app, "calendar_feeds", "idx_calendar_feeds_user_subscription_unique")
+	assertIndex(t, app, "calendar_feeds", "idx_calendar_feeds_user_scope_updated_id")
 	assertIndex(t, app, "public_status_pages", "idx_public_status_pages_user_unique")
 	assertIndex(t, app, "public_status_pages", "idx_public_status_pages_token_unique")
 	assertIndex(t, app, "api_tokens", "idx_api_tokens_user_created")
@@ -411,6 +417,9 @@ func TestEnsureSchemaSelfHealsSubscriptionLogoURLFieldToText(t *testing.T) {
 	if err := upsertField(subscriptions, &core.NumberField{Name: "price"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := upsertField(subscriptions, &core.SelectField{Name: "status", Required: true, Values: []string{"trial", "active", "expired", "paused", "cancelled"}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := app.Save(subscriptions); err != nil {
 		t.Fatal(err)
 	}
@@ -424,6 +433,7 @@ func TestEnsureSchemaSelfHealsSubscriptionLogoURLFieldToText(t *testing.T) {
 	record := core.NewRecord(subscriptions)
 	record.Set("user", user.Id)
 	record.Set("name", "Logo Field")
+	record.Set("status", "active")
 	record.Set("logo", "https://example.com/logo.png")
 	record.Set("price", 12.5)
 	if err := app.Save(record); err != nil {
@@ -474,6 +484,9 @@ func TestEnsureSchemaMigratesLegacySubscriptionPriceNumberFieldToText(t *testing
 	if err := upsertField(subscriptions, &core.NumberField{Name: "price"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := upsertField(subscriptions, &core.SelectField{Name: "status", Required: true, Values: []string{"trial", "active", "expired", "paused", "cancelled"}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := app.Save(subscriptions); err != nil {
 		t.Fatal(err)
 	}
@@ -488,6 +501,7 @@ func TestEnsureSchemaMigratesLegacySubscriptionPriceNumberFieldToText(t *testing
 	record := core.NewRecord(subscriptions)
 	record.Set("user", user.Id)
 	record.Set("name", "Legacy Price")
+	record.Set("status", "active")
 	record.Set("logo", "https://example.com/logo.png")
 	record.Set("price", 12.5)
 	if err := app.Save(record); err != nil {

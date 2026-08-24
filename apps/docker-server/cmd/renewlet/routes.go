@@ -20,8 +20,9 @@ import (
 	"github.com/pocketbase/pocketbase/tools/router"
 )
 
-func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
-	api := router.Group("").BindFunc(apiErrorMiddleware).BindFunc(appSameOriginUnsafeMiddleware)
+func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) []apiRouteContract {
+	registry := newProductRouteRegistry()
+	api := newProductRouteGroup(router.Group(""), "", registry).BindFunc(apiErrorMiddleware).BindFunc(appSameOriginUnsafeMiddleware)
 
 	// 公共状态接口不要求认证，但响应仍使用命名 struct，避免前端在登录前信任松散 JSON。
 	api.GET("/api/app/health", func(e *core.RequestEvent) error {
@@ -231,39 +232,40 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 		}
 		return apiEmptySuccessJSON(e, http.StatusOK)
 	})
+	// route 只接受任务并暴露内存快照；后台执行不得重新绑定请求 context，也不能把长下载塞回 HTTP 响应周期。
 	admin.POST("/system/update", func(e *core.RequestEvent) error {
 		locale := requestLocale(e.Request)
 		if _, err := decodeStrictJSON[systemUpdateRequest](e.Request, locale); err != nil {
 			return e.BadRequestError(validationErrorMessage(locale, "common.invalidRequestBody", err), err)
 		}
-		result, err := defaultSystemUpdateService.PerformUpdate(e.Request.Context(), locale)
+		operation, err := defaultSystemUpdateService.StartUpdate(locale)
 		if err != nil {
 			switch {
-			case errors.Is(err, errSystemUpdateInProgress):
-				return e.TooManyRequestsError(err.Error(), nil)
-			case errors.Is(err, errSystemUpdateUnsupported), errors.Is(err, errSystemUpdateNoUpdate):
+			case errors.Is(err, errSystemUpdateUnsupported):
 				return e.BadRequestError(err.Error(), nil)
 			default:
-				if details := systemUpstreamErrorDetails(err); details != nil {
-					return apiErrorJSON(e, http.StatusInternalServerError, "SYSTEM_UPDATE_FAILED", serverText(locale, "system.updateFailed"), details)
-				}
-				return e.InternalServerError(serverText(locale, "system.updateFailed"), err)
+				return apiErrorJSON(e, http.StatusInternalServerError, "SYSTEM_UPDATE_FAILED", serverText(locale, "system.updateFailed"), nil)
 			}
 		}
-		if err := apiSuccessJSON(e, http.StatusOK, result); err != nil {
-			return err
-		}
-		return nil
+		e.Response.Header().Set("Location", "/api/app/admin/system/update/status")
+		e.Response.Header().Set("Retry-After", "1")
+		e.Response.Header().Set("Cache-Control", "no-store")
+		return apiSuccessJSON(e, http.StatusAccepted, systemUpdateOperationResponse{Operation: operation})
+	})
+	admin.GET("/system/update/status", func(e *core.RequestEvent) error {
+		e.Response.Header().Set("Cache-Control", "no-store")
+		return apiSuccessJSON(e, http.StatusOK, systemUpdateOperationResponse{Operation: defaultSystemUpdateService.CurrentOperation(requestLocale(e.Request))})
 	})
 	admin.POST("/system/restart", func(e *core.RequestEvent) error {
 		locale := requestLocale(e.Request)
 		if _, err := decodeStrictJSON[systemRestartRequest](e.Request, locale); err != nil {
 			return e.BadRequestError(validationErrorMessage(locale, "common.invalidRequestBody", err), err)
 		}
-		if err := defaultSystemUpdateService.ConfirmRestart(locale); err != nil {
+		if err := defaultSystemUpdateService.ReserveRestart(locale); err != nil {
 			return e.BadRequestError(err.Error(), nil)
 		}
 		if err := apiEmptySuccessJSON(e, http.StatusOK); err != nil {
+			defaultSystemUpdateService.RollbackRestart()
 			return err
 		}
 		// 只在管理员显式确认后退出，确保前端能先展示“更新完成”并开始等待健康检查恢复。
@@ -319,6 +321,7 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 	auth.POST("/auth/passkeys/register/verify", func(e *core.RequestEvent) error { return handlePasskeyRegisterVerify(app, e) })
 	auth.POST("/auth/passkeys/{id}/delete", func(e *core.RequestEvent) error { return handlePasskeyDelete(app, e) })
 	auth.POST("/notifications/test", demoModeExternalSideEffectGuard(func(e *core.RequestEvent) error { return handleNotificationTest(app, e) }))
+	auth.GET("/notifications/overview", func(e *core.RequestEvent) error { return handleNotificationOverview(app, e) })
 	auth.GET("/notifications/history", func(e *core.RequestEvent) error { return handleNotificationHistory(app, e) })
 	auth.POST("/notifications/run", demoModeExternalSideEffectGuard(func(e *core.RequestEvent) error { return handleNotificationRun(app, e) }))
 	// 导入预览和应用都要求登录态；冲突判断只在当前用户数据内完成，避免备份里的来源 ID 探测他人订阅。
@@ -353,6 +356,14 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 	auth.PUT("/exchange-rate-snapshots/{month}", func(e *core.RequestEvent) error { return handleExchangeRateSnapshotPut(app, e) })
 	auth.GET("/subscriptions", func(e *core.RequestEvent) error { return handleSubscriptionsList(app, e) })
 	auth.POST("/subscriptions", func(e *core.RequestEvent) error { return handleSubscriptionCreate(app, e) })
+	// 静态集合路由必须先于 {id} 详情路由注册，防止 index/analytics/calendar-feeds/facets/export 被解释成订阅 ID。
+	auth.GET("/subscriptions/index", func(e *core.RequestEvent) error { return handleSubscriptionsIndex(app, e) })
+	auth.GET("/subscriptions/analytics", func(e *core.RequestEvent) error { return handleSubscriptionsAnalytics(app, e) })
+	auth.GET("/subscriptions/calendar", func(e *core.RequestEvent) error { return handleSubscriptionsCalendar(app, e) })
+	auth.GET("/subscriptions/calendar-feeds", func(e *core.RequestEvent) error { return handleSubscriptionCalendarFeedsList(app, e) })
+	auth.GET("/subscriptions/facets", func(e *core.RequestEvent) error { return handleSubscriptionsFacets(app, e) })
+	auth.GET("/subscriptions/export", func(e *core.RequestEvent) error { return handleSubscriptionsExport(app, e) })
+	auth.GET("/subscriptions/{id}", func(e *core.RequestEvent) error { return handleSubscriptionRead(app, e) })
 	auth.PATCH("/subscriptions/{id}", func(e *core.RequestEvent) error { return handleSubscriptionUpdate(app, e) })
 	auth.DELETE("/subscriptions/{id}", func(e *core.RequestEvent) error { return handleSubscriptionDelete(app, e) })
 	auth.GET("/assets", func(e *core.RequestEvent) error { return handleAssetsList(app, e) })
@@ -363,6 +374,7 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 	// Feed 管理 API 只服务登录用户；公开 ICS route 另走 token bearer secret，不复用 session。
 	auth.GET("/calendar-feed", func(e *core.RequestEvent) error { return handleCalendarFeedStatus(app, e) })
 	auth.POST("/calendar-feed", func(e *core.RequestEvent) error { return handleCalendarFeedCreate(app, e) })
+	auth.POST("/calendar-feed/rotate", func(e *core.RequestEvent) error { return handleCalendarFeedRotate(app, e) })
 	auth.DELETE("/calendar-feed", func(e *core.RequestEvent) error { return handleCalendarFeedDelete(app, e) })
 	auth.GET("/public-status-page", func(e *core.RequestEvent) error { return handlePublicStatusPageStatus(app, e) })
 	auth.POST("/public-status-page", func(e *core.RequestEvent) error { return handlePublicStatusPageCreate(app, e) })
@@ -372,6 +384,7 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 	auth.GET("/subscriptions/{id}/calendar.ics", func(e *core.RequestEvent) error { return handleSubscriptionCalendarICSDownload(app, e) })
 	auth.GET("/subscriptions/{id}/calendar-feed", func(e *core.RequestEvent) error { return handleSubscriptionCalendarFeedStatus(app, e) })
 	auth.POST("/subscriptions/{id}/calendar-feed", func(e *core.RequestEvent) error { return handleSubscriptionCalendarFeedCreate(app, e) })
+	auth.POST("/subscriptions/{id}/calendar-feed/rotate", func(e *core.RequestEvent) error { return handleSubscriptionCalendarFeedRotate(app, e) })
 	auth.DELETE("/subscriptions/{id}/calendar-feed", func(e *core.RequestEvent) error { return handleSubscriptionCalendarFeedDelete(app, e) })
 	// 媒体候选统一入口承接 favicon 与内置 provider，前端不再拼旧 favicon-search/图标 provider 路径。
 	auth.POST("/media/candidates", mediaCandidates)
@@ -380,7 +393,8 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 		return apiSuccessJSON(e, http.StatusOK, passwordResetStatusResponse{Enabled: app.Settings().SMTP.Enabled})
 	})
 
-	registerAPIFallbacks(api)
+	registerAPIFallbacks(api.Raw(), registry)
+	return registry.Contracts()
 }
 
 func handleSystemVersion(e *core.RequestEvent) error {

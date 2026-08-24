@@ -82,10 +82,10 @@ func ensureCollectionsSchema(app core.App) error {
 	if err := ensureSubscriptionSchedulerStatesCollection(app, users); err != nil {
 		return err
 	}
-	if err := ensureSubscriptionDerivedTables(app); err != nil {
+	if err := ensureSettingsCollection(app, users); err != nil {
 		return err
 	}
-	if err := ensureSettingsCollection(app, users); err != nil {
+	if err := ensureSubscriptionDerivedTables(app); err != nil {
 		return err
 	}
 	if err := ensureCustomConfigsCollection(app, users); err != nil {
@@ -145,10 +145,6 @@ func ensureUsersCollectionSchema(app core.App, users *core.Collection) error {
 		return err
 	}
 	return saveCollectionIfChanged(app, users, before, false)
-}
-
-func ensureField(collection *core.Collection, field core.Field) error {
-	return upsertField(collection, field)
 }
 
 func upsertField(collection *core.Collection, field core.Field) error {
@@ -292,6 +288,9 @@ func ensureSubscriptionsCollection(app core.App, users *core.Collection) error {
 			&core.TextField{Name: "notes", Max: 5000},
 			&core.JSONField{Name: "tags", MaxSize: maxSubscriptionTagsFieldSize},
 			&core.JSONField{Name: "costSharing", MaxSize: 65536},
+			// 内部镜像字段只为通知候选索引存在；公共契约仍读取 costSharing JSON。
+			&core.BoolField{Name: "costSharingCollectionReminderEnabled"},
+			&core.TextField{Name: "costSharingNextCollectionReminderDate", Max: 10, Pattern: `^$|^\d{4}-\d{2}-\d{2}$`},
 			&core.JSONField{Name: "extra", MaxSize: 65536},
 			&core.NumberField{Name: "reminderDays", OnlyInt: true, Min: types.Pointer(float64(disabledReminderDays)), Max: types.Pointer(float64(maxReminderDays))},
 			&core.BoolField{Name: "repeatReminderEnabled"},
@@ -316,6 +315,7 @@ func ensureSubscriptionsCollection(app core.App, users *core.Collection) error {
 		if err := ensureAutodates(c); err != nil {
 			return false, err
 		}
+		c.Fields.RemoveByName("costSharingCollectionReminderDays")
 		c.AddIndex("idx_subscriptions_user", false, "user", "")
 		c.AddIndex("idx_subscriptions_user_logo", false, "user, logo", "")
 		c.AddIndex("idx_subscriptions_user_next_billing", false, "user, nextBillingDate", "")
@@ -332,6 +332,7 @@ func ensureSubscriptionsCollection(app core.App, users *core.Collection) error {
 			"idx_subscriptions_user_reminder_due",
 			"idx_subscriptions_user_trial_reminder",
 			"idx_subscriptions_user_repeat_reminder",
+			"idx_subscriptions_user_cost_sharing_collection_due",
 		} {
 			removeIndex(c, name)
 		}
@@ -339,6 +340,8 @@ func ensureSubscriptionsCollection(app core.App, users *core.Collection) error {
 		c.AddIndex("idx_subscriptions_user_auto_renew_due", false, "user, autoRenew, nextBillingDate, id", "")
 		c.AddIndex("idx_subscriptions_user_reminder_due", false, "user, nextBillingDate, id", "")
 		c.AddIndex("idx_subscriptions_user_trial_reminder", false, "user, trialEndDate, id", "")
+		// 家庭收款提醒单独走 enabled + next reminder date 索引，避免 cron 为 JSON 子字段做全用户扫描。
+		c.AddIndex("idx_subscriptions_user_cost_sharing_collection_due", false, "user, costSharingCollectionReminderEnabled, costSharingNextCollectionReminderDate, id", "")
 		c.AddIndex("idx_subscriptions_user_repeat_reminder", false, "user, repeatReminderEnabled, nextBillingDate, id", "")
 		c.AddIndex("idx_subscriptions_user_repeat_trial_reminder", false, "user, repeatReminderEnabled, status, trialEndDate, id", "")
 		return replaceLegacyLogoURLField, nil
@@ -578,6 +581,7 @@ func ensureCalendarFeedsCollection(app core.App, users *core.Collection) error {
 		c.AddIndex("idx_calendar_feeds_user_all_unique", true, "user", "scope = 'all'")
 		c.AddIndex("idx_calendar_feeds_token_unique", true, "token", "")
 		c.AddIndex("idx_calendar_feeds_user_subscription_unique", true, "user, subscriptionId", "scope = 'subscription'")
+		c.AddIndex("idx_calendar_feeds_user_scope_updated_id", false, "user, scope, updated DESC, id DESC", "")
 		return nil
 	})
 }

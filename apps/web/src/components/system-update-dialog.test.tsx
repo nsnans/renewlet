@@ -37,7 +37,6 @@ vi.mock("@/i18n/I18nProvider", () => ({
         "system.commitLink": "提交",
         "system.currentVersion": "当前版本",
         "system.latestVersion": "最新版本",
-        "system.noUpdateDescription": "无需操作。",
         "system.noUpdateTitle": "已是最新版本",
         "system.openUpdateDialog": "打开系统更新",
         "system.cloudflareDeployGuide": "Cloudflare 部署说明",
@@ -113,8 +112,25 @@ function versionFixture(overrides: Record<string, unknown> = {}) {
 function mockVersionEndpoint(overrides: Record<string, unknown> = {}) {
   mocks.apiFetch.mockImplementation((input: string) => {
     if (input.startsWith("/api/app/system/version")) return Promise.resolve(versionFixture(overrides));
+    if (input === "/api/app/admin/system/update/status") return Promise.resolve({ operation: null });
     return Promise.reject(new Error(`Unexpected request ${input}`));
   });
+}
+
+function operationFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "operation-1",
+    status: "running",
+    stage: "downloading",
+    currentVersion: "1.0.0",
+    targetVersion: "1.1.0",
+    startedAt: "2026-08-14T01:00:00Z",
+    updatedAt: "2026-08-14T01:00:01Z",
+    finishedAt: null,
+    needsRestart: false,
+    error: null,
+    ...overrides,
+  };
 }
 
 function renderWithQuery(ui: ReactElement) {
@@ -133,7 +149,7 @@ function renderWithQuery(ui: ReactElement) {
 
 function SystemUpdateHarness() {
   const [open, setOpen] = useState(false);
-  return <SystemUpdateDialog open={open} onOpenChange={setOpen} />;
+  return <SystemUpdateDialog open={open} onOpenChange={setOpen} canManageUpdates />;
 }
 
 describe("SystemUpdateDialog", () => {
@@ -187,7 +203,7 @@ describe("SystemUpdateDialog", () => {
 
     expect(await screen.findByText("已是最新版本")).toBeInTheDocument();
     expect(screen.getAllByText("已是最新版本")).toHaveLength(1);
-    expect(screen.getByText("无需操作。")).toBeInTheDocument();
+    expect(screen.queryByText("无需操作。")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("已是最新版本");
     expect(screen.queryByText("暂时无法检查更新")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "立即更新" })).not.toBeInTheDocument();
@@ -215,10 +231,23 @@ describe("SystemUpdateDialog", () => {
   });
 
   it("updates release builds and then shows restart flow", async () => {
+    let updateStarted = false;
     mocks.apiFetch.mockImplementation((input: string, _schema: unknown, init?: RequestInit) => {
       if (input.startsWith("/api/app/system/version")) return Promise.resolve(versionFixture());
+      if (input === "/api/app/admin/system/update/status") {
+        return Promise.resolve({
+          operation: updateStarted ? operationFixture({
+            status: "succeeded",
+            stage: "restart-pending",
+            updatedAt: "2026-08-14T01:00:02Z",
+            finishedAt: "2026-08-14T01:00:02Z",
+            needsRestart: true,
+          }) : null,
+        });
+      }
       if (input === "/api/app/admin/system/update" && init?.method === "POST") {
-        return Promise.resolve({ currentVersion: "1.0.0", targetVersion: "1.1.0", needsRestart: true, message: "更新完成" });
+        updateStarted = true;
+        return Promise.resolve({ operation: operationFixture() });
       }
       return Promise.reject(new Error(`Unexpected request ${input}`));
     });
@@ -231,6 +260,79 @@ describe("SystemUpdateDialog", () => {
 
     expect(await screen.findByText("更新完成")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "立即重启" })).toBeInTheDocument();
+  });
+
+  it("stops polling while closed and restores the running task when reopened", async () => {
+    let updateStarted = false;
+    mocks.apiFetch.mockImplementation((input: string, _schema: unknown, init?: RequestInit) => {
+      if (input.startsWith("/api/app/system/version")) return Promise.resolve(versionFixture());
+      if (input === "/api/app/admin/system/update/status") {
+        return Promise.resolve({ operation: updateStarted ? operationFixture() : null });
+      }
+      if (input === "/api/app/admin/system/update" && init?.method === "POST") {
+        updateStarted = true;
+        return Promise.resolve({ operation: operationFixture() });
+      }
+      return Promise.reject(new Error(`Unexpected request ${input}`));
+    });
+
+    const user = userEvent.setup();
+    renderWithQuery(<SystemUpdateHarness />);
+    const trigger = await screen.findByRole("button", { name: "打开系统更新" });
+    await user.click(trigger);
+    await user.click(await screen.findByRole("button", { name: "立即更新" }));
+    expect(await screen.findByRole("button", { name: "更新中..." })).toBeDisabled();
+
+    await user.click(trigger);
+    await waitFor(() => expect(screen.queryByText("当前版本")).not.toBeInTheDocument());
+    const callsAfterClose = mocks.apiFetch.mock.calls.filter(([input]) => input === "/api/app/admin/system/update/status").length;
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(mocks.apiFetch.mock.calls.filter(([input]) => input === "/api/app/admin/system/update/status")).toHaveLength(callsAfterClose);
+
+    await user.click(trigger);
+    expect(await screen.findByRole("button", { name: "更新中..." })).toBeDisabled();
+    await waitFor(() => {
+      expect(mocks.apiFetch.mock.calls.filter(([input]) => input === "/api/app/admin/system/update/status").length).toBeGreaterThan(callsAfterClose);
+    });
+  });
+
+  it("shows background task error details and allows a new task retry", async () => {
+    let started = false;
+    let postCount = 0;
+    mocks.apiFetch.mockImplementation((input: string, _schema: unknown, init?: RequestInit) => {
+      if (input.startsWith("/api/app/system/version")) return Promise.resolve(versionFixture());
+      if (input === "/api/app/admin/system/update/status") {
+        return Promise.resolve({
+          operation: started ? operationFixture({
+            status: "failed",
+            finishedAt: "2026-08-14T01:00:02Z",
+            updatedAt: "2026-08-14T01:00:02Z",
+            error: {
+              code: "SYSTEM_UPDATE_FAILED",
+              message: "下载失败",
+              details: { rawResponseText: "upstream unavailable" },
+            },
+          }) : null,
+        });
+      }
+      if (input === "/api/app/admin/system/update" && init?.method === "POST") {
+        started = true;
+        postCount += 1;
+        return Promise.resolve({ operation: operationFixture({ id: `operation-${postCount}` }) });
+      }
+      return Promise.reject(new Error(`Unexpected request ${input}`));
+    });
+
+    const user = userEvent.setup();
+    renderWithQuery(<SystemUpdateHarness />);
+    await user.click(await screen.findByRole("button", { name: "打开系统更新" }));
+    await user.click(await screen.findByRole("button", { name: "立即更新" }));
+
+    const detailsDialog = await screen.findByRole("dialog", { name: "错误响应详情" });
+    expect(detailsDialog).toHaveTextContent("upstream unavailable");
+    await user.click(within(detailsDialog).getByRole("button", { name: "关闭" }));
+    await user.click(await screen.findByRole("button", { name: "重试" }));
+    expect(postCount).toBe(2);
   });
 
   it("shows release asset unavailable state without update actions", async () => {
@@ -391,7 +493,7 @@ describe("SystemUpdateDialog", () => {
     await user.click(await screen.findByRole("button", { name: "打开系统更新" }));
 
     expect(await screen.findByText("已是最新版本")).toBeInTheDocument();
-    expect(screen.getByText("无需操作。")).toBeInTheDocument();
+    expect(screen.queryByText("无需操作。")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "提交" })).toHaveAttribute("href", "https://github.com/zhiyingzzhou/renewlet/commit/504c1681822ac60f0caafdb0b1ba731853c9169d");
     expect(screen.queryByText("页面内更新不可用")).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Cloudflare 部署说明" })).not.toBeInTheDocument();
@@ -433,6 +535,7 @@ describe("SystemUpdateDialog", () => {
   it("shows update error and retry button", async () => {
     mocks.apiFetch.mockImplementation((input: string, _schema: unknown, init?: RequestInit) => {
       if (input.startsWith("/api/app/system/version")) return Promise.resolve(versionFixture());
+      if (input === "/api/app/admin/system/update/status") return Promise.resolve({ operation: null });
       if (input === "/api/app/admin/system/update" && init?.method === "POST") {
         return Promise.reject(new Error("下载失败"));
       }
@@ -456,10 +559,23 @@ describe("SystemUpdateDialog", () => {
     const reload = vi.fn();
     vi.spyOn(systemRestartBrowser, "reload").mockImplementation(reload);
     const fetchMock = vi.spyOn(window, "fetch").mockResolvedValue({ ok: true } as Response);
+    let updateStarted = false;
     mocks.apiFetch.mockImplementation((input: string, _schema: unknown, init?: RequestInit) => {
       if (input.startsWith("/api/app/system/version")) return Promise.resolve(versionFixture());
+      if (input === "/api/app/admin/system/update/status") {
+        return Promise.resolve({
+          operation: updateStarted ? operationFixture({
+            status: "succeeded",
+            stage: "restart-pending",
+            updatedAt: "2026-08-14T01:00:02Z",
+            finishedAt: "2026-08-14T01:00:02Z",
+            needsRestart: true,
+          }) : null,
+        });
+      }
       if (input === "/api/app/admin/system/update" && init?.method === "POST") {
-        return Promise.resolve({ currentVersion: "1.0.0", targetVersion: "1.1.0", needsRestart: true, message: "更新完成" });
+        updateStarted = true;
+        return Promise.resolve({ operation: operationFixture() });
       }
       if (input === "/api/app/admin/system/restart" && init?.method === "POST") return Promise.resolve({});
       return Promise.reject(new Error(`Unexpected request ${input}`));

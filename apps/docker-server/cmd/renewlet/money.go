@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -90,14 +91,6 @@ func canonicalMoneyFromFloat(value float64) (string, error) {
 	return canonicalMoneyString(strconv.FormatFloat(value, 'f', moneyDecimalScale, 64))
 }
 
-func canonicalMoneyFromFloatMust(value float64) string {
-	amount, err := canonicalMoneyFromFloat(value)
-	if err != nil {
-		return "0"
-	}
-	return amount
-}
-
 func canonicalMoneyFromNumberString(value string) (string, error) {
 	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 	if err != nil {
@@ -141,4 +134,40 @@ func moneyUnits(value string) (int64, error) {
 		return 0, err
 	}
 	return integer*moneyScaleFactor + fractionUnits, nil
+}
+
+func divideMoneyString(value string, denominator int) string {
+	if denominator <= 0 {
+		return "0"
+	}
+	units, err := moneyUnits(moneyForRecord(value))
+	if err != nil {
+		return "0"
+	}
+	// 家庭共享 equal 模式按最小金额单位四舍五入，避免 float 平分在 Go/Worker 间出现尾差。
+	return moneyUnitsToString(roundMoneyUnitsDiv(units, int64(denominator)))
+}
+
+func roundMoneyUnitsDiv(numerator int64, denominator int64) int64 {
+	if denominator <= 0 {
+		return 0
+	}
+	quotient := numerator / denominator
+	remainder := numerator % denominator
+	if remainder*2 >= denominator {
+		return quotient + 1
+	}
+	return quotient
+}
+
+func moneyUnitsToString(units int64) string {
+	if units <= 0 {
+		return "0"
+	}
+	integer := units / moneyScaleFactor
+	fraction := units % moneyScaleFactor
+	if fraction == 0 {
+		return strconv.FormatInt(integer, 10)
+	}
+	return strconv.FormatInt(integer, 10) + "." + strings.TrimRight(fmt.Sprintf("%06d", fraction), "0")
 }

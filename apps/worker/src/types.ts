@@ -181,10 +181,40 @@ export interface SubscriptionRow {
   repeat_reminder_interval: string;
   repeat_reminder_window: string;
   cost_sharing_json?: string;
+  // 内部镜像列只给 D1 通知候选索引使用；API 出站必须继续从 cost_sharing_json 解析。
+  cost_sharing_collection_reminder_enabled: number;
+  cost_sharing_next_collection_reminder_date: string | null;
   extra_json: string;
   created_at: string;
   updated_at: string;
 }
+
+/** 私有集合查询只读取轻量 DTO 所需列，详情字段不会进入列表、统计或日历的 D1 结果集。 */
+export type SubscriptionCollectionRow = Pick<SubscriptionRow,
+  | "id"
+  | "name"
+  | "logo"
+  | "price"
+  | "currency"
+  | "billing_cycle"
+  | "custom_days"
+  | "custom_cycle_unit"
+  | "one_time_term_count"
+  | "one_time_term_unit"
+  | "category"
+  | "status"
+  | "pinned"
+  | "public_hidden"
+  | "payment_method"
+  | "start_date"
+  | "next_billing_date"
+  | "auto_renew"
+  | "auto_calculate_next_billing_date"
+  | "trial_end_date"
+  | "reminder_days"
+  | "cost_sharing_json"
+  | "created_at"
+>;
 
 /** 每用户调度 gate；Cron 先读这里，空状态下不再触碰 subscriptions 候选查询。 */
 export interface SubscriptionSchedulerStateRow {
@@ -228,8 +258,11 @@ export interface SubscriptionListIndexRow {
 export interface SubscriptionUserStatsRow {
   user_id: string;
   total_count: number;
-  status_counts_json: string;
-  source_updated_at: string | null;
+  trial_count: number;
+  active_count: number;
+  expired_count: number;
+  paused_count: number;
+  cancelled_count: number;
   created_at: string;
   updated_at: string;
 }
