@@ -85,7 +85,7 @@ describe("ConfigManagerDialog", () => {
     for (const value of expectedValues) {
       expect(within(dialog).getByText(value)).toBeInTheDocument();
     }
-    expect(dialog.querySelector('[class*="min-h-[240px]"]')).toBeNull();
+    expect(dialog.querySelector('[class~="min-h-60"]')).toBeNull();
   });
 
   it("uses the visible description as the dialog accessible description", async () => {
@@ -256,7 +256,13 @@ describe("ConfigManagerDialog", () => {
     const list = dialog.querySelector("[data-config-manager-list]");
     const footer = dialog.querySelector("[data-settings-manager-footer]");
 
-    expect(dialog).toHaveClass("max-w-3xl", "overflow-hidden", "p-0");
+    expect(dialog).toHaveClass(
+      "h5-dialog-frame",
+      "h5-settings-manager-dialog-panel",
+      "max-w-3xl",
+      "overflow-hidden",
+      "p-0",
+    );
     expect(header).toHaveClass("shrink-0");
     expect(controls).toHaveClass("shrink-0");
     expect(scrollRegion).toHaveClass("min-h-0", "overflow-y-auto");

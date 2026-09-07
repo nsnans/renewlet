@@ -8,6 +8,7 @@ package main
 //   - 私有 Logo 通过公开资产代理读取，代理每次都重新校验 token、owner 和可见订阅引用。
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -17,8 +18,7 @@ import (
 )
 
 const (
-	publicStatusSubscriptionLimit    = 500
-	publicStatusSubscriptionPageSize = 500
+	publicStatusSubscriptionLimit = 500
 )
 
 // publicStatusPageStatus 是登录用户设置页看到的公开展示页状态。
@@ -70,6 +70,7 @@ type publicStatusPageView struct {
 	ShowPrices        bool                     `json:"showPrices"`
 	Currency          string                   `json:"currency,omitempty"`
 	ExchangeRateBasis *exchangeRatePublicBasis `json:"exchangeRateBasis,omitempty"`
+	AsOf              string                   `json:"asOf"`
 	GeneratedAt       string                   `json:"generatedAt"`
 	Truncated         bool                     `json:"truncated"`
 }
@@ -82,7 +83,7 @@ type publicStatusSubscriptionView struct {
 	Category         publicStatusCategoryView `json:"category"`
 	Status           string                   `json:"status"`
 	StartDate        *string                  `json:"startDate"`
-	NextBillingDate  string                   `json:"nextBillingDate"`
+	NextBillingDate  *string                  `json:"nextBillingDate"`
 	UpdatedAt        string                   `json:"updatedAt"`
 	Price            *string                  `json:"price,omitempty"`
 	Currency         string                   `json:"currency,omitempty"`
@@ -274,23 +275,30 @@ func publicStatusAssetURL(request *http.Request, token string, assetID string) s
 
 func buildPublicStatusResponse(app core.App, request *http.Request, page *core.Record) (publicStatusResponse, error) {
 	userID := page.GetString("user")
-	settings := publicStatusSettingsForUser(app, userID)
-	resolver := newPublicStatusCategoryResolver(app, userID, normalizeAppLocale(settings.Locale))
-	today := todayDateOnly(time.Now().UTC(), settings.Timezone)
+	settings, err := publicStatusSettingsForUser(app, userID)
+	if err != nil {
+		return publicStatusResponse{}, err
+	}
+	// 公开状态页属于访客界面；分类标签跟随本次请求，不继承页面 owner 的账号内容语言。
+	resolver := newPublicStatusCategoryResolver(app, userID, requestLocale(request))
+	now := time.Now().UTC()
+	today := todayDateOnly(now, settings.Timezone)
 	items, truncated, err := listPublicStatusSubscriptions(app, request, page, resolver, today)
 	if err != nil {
 		return publicStatusResponse{}, err
 	}
 	showPrices := page.GetBool("showPrices")
 	view := publicStatusPageView{
-		Title:       "Renewlet",
-		ShowPrices:  showPrices,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Title:      "Renewlet",
+		ShowPrices: showPrices,
+		// AsOf 是 owner 账号时区下的 date-only；匿名前端不得从 UTC GeneratedAt 猜测业务日期。
+		AsOf:        today,
+		GeneratedAt: now.Format(time.RFC3339),
 		Truncated:   truncated,
 	}
 	if showPrices {
 		view.Currency = effectivePublicStatusCurrency(settings)
-		basis := exchangeRatePublicBasisForUser(app, userID, time.Now().UTC())
+		basis := exchangeRatePublicBasisForUser(app, userID, now)
 		view.ExchangeRateBasis = &basis
 	}
 	return publicStatusResponse{
@@ -302,43 +310,37 @@ func buildPublicStatusResponse(app core.App, request *http.Request, page *core.R
 func listPublicStatusSubscriptions(app core.App, request *http.Request, page *core.Record, resolver publicStatusCategoryResolver, today string) ([]publicStatusSubscriptionView, bool, error) {
 	userID := page.GetString("user")
 	token := page.GetString("token")
-	items := []publicStatusSubscriptionView{}
-	for offset := 0; ; offset += publicStatusSubscriptionPageSize {
-		// 公开页顺序跟订阅列表默认口径一致；created/id 只参与内部排序，不能进入公开 allowlist。
-		rows, err := app.FindRecordsByFilter(
-			"subscriptions",
-			"user = {:user} && publicHidden = false",
-			"-pinned,-created,-id",
-			publicStatusSubscriptionPageSize,
-			offset,
-			dbx.Params{"user": userID},
-		)
-		if err != nil {
-			return nil, false, err
-		}
-		for _, row := range rows {
-			items = append(items, publicStatusSubscriptionFromRecord(request, token, row, resolver, page.GetBool("showPrices"), today))
-			if len(items) > publicStatusSubscriptionLimit {
-				return items[:publicStatusSubscriptionLimit], true, nil
-			}
-		}
-		if len(rows) < publicStatusSubscriptionPageSize {
-			return items, false, nil
-		}
+	publicHidden := false
+	// 公开页复用私有默认集合顺序，但不复用私有 cursor；created/id 仍只参与内部排序，不能进入公开 allowlist。
+	rows, err := listSubscriptionRecordsInDefaultOrder(app, userID, today, publicStatusSubscriptionLimit, &publicHidden)
+	if err != nil {
+		return nil, false, err
 	}
+	truncated := len(rows) > publicStatusSubscriptionLimit
+	if truncated {
+		rows = rows[:publicStatusSubscriptionLimit]
+	}
+	items := make([]publicStatusSubscriptionView, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, publicStatusSubscriptionFromRecord(request, token, row, resolver, page.GetBool("showPrices"), today))
+	}
+	return items, truncated, nil
 }
 
 func publicStatusSubscriptionFromRecord(request *http.Request, token string, row *core.Record, resolver publicStatusCategoryResolver, showPrices bool, today string) publicStatusSubscriptionView {
 	item := publicStatusSubscriptionView{
-		Name:            row.GetString("name"),
-		Logo:            publicStatusLogoURL(request, token, row.GetString("logo")),
-		Category:        resolver.Category(row.GetString("category")),
-		Status:          publicStatusEffectiveStatus(row, today),
-		StartDate:       nullableStringPointer(row.GetString("startDate")),
-		NextBillingDate: row.GetString("nextBillingDate"),
-		UpdatedAt:       row.GetDateTime("updated").Time().UTC().Format(time.RFC3339),
+		Name:      row.GetString("name"),
+		Logo:      publicStatusLogoURL(request, token, row.GetString("logo")),
+		Category:  resolver.Category(row.GetString("category")),
+		Status:    publicStatusEffectiveStatus(row, today),
+		StartDate: nullableStringPointer(row.GetString("startDate")),
+		UpdatedAt: row.GetDateTime("updated").Time().UTC().Format(time.RFC3339),
+	}
+	if row.GetString("billingCycle") != "one-time" || row.GetInt("oneTimeTermCount") > 0 {
+		item.NextBillingDate = nullableStringPointer(row.GetString("nextBillingDate"))
 	}
 	if showPrices {
+		oneTimeTermCount := row.GetInt("oneTimeTermCount")
 		price := moneyForRecord(row.Get("price"))
 		item.Price = &price
 		item.Currency = row.GetString("currency")
@@ -349,10 +351,8 @@ func publicStatusSubscriptionFromRecord(request *http.Request, token string, row
 		if row.GetString("customCycleUnit") != "" {
 			item.CustomCycleUnit = row.GetString("customCycleUnit")
 		}
-		if row.GetInt("oneTimeTermCount") > 0 {
-			item.OneTimeTermCount = row.GetInt("oneTimeTermCount")
-		}
-		if row.GetString("oneTimeTermUnit") != "" {
+		if oneTimeTermCount > 0 && row.GetString("oneTimeTermUnit") != "" {
+			item.OneTimeTermCount = oneTimeTermCount
 			item.OneTimeTermUnit = row.GetString("oneTimeTermUnit")
 		}
 	}
@@ -420,11 +420,14 @@ func publicStatusAssetIsReferenced(app core.App, userID string, assetID string) 
 	return record != nil, nil
 }
 
-func publicStatusSettingsForUser(app core.App, userID string) appSettings {
+func publicStatusSettingsForUser(app core.App, userID string) (appSettings, error) {
 	settings := defaultAppSettings()
 	record, err := app.FindFirstRecordByFilter("settings", "user = {:user}", dbx.Params{"user": userID})
 	if err != nil {
-		return settings
+		if errors.Is(err, sql.ErrNoRows) {
+			return settings, nil
+		}
+		return appSettings{}, err
 	}
 	return settingsFromRecord(record)
 }

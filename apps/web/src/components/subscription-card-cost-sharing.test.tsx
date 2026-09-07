@@ -64,7 +64,7 @@ describe("SubscriptionCard cost sharing", () => {
       <TooltipProvider delayDuration={0}>
         <SubscriptionCard
           subscription={subscription}
-          timeZone="Asia/Shanghai"
+          today="2026-05-18"
           categoryByValue={new Map([[category.value, category]])}
           paymentMethodByValue={new Map()}
           currencyRatesReady={true}
@@ -81,5 +81,6 @@ describe("SubscriptionCard cost sharing", () => {
     );
 
     expect(screen.getByText(/你的份额\s*¥0 CNY/)).toBeInTheDocument();
+    expect(screen.getByText("日均 ¥1.67")).toBeInTheDocument();
   });
 });

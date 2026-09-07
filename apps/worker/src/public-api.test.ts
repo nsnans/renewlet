@@ -61,7 +61,7 @@ function d1Result<T = unknown>(results: T[], changes = 0): D1Result<T> {
 }
 
 function createEnv(overrides: Partial<PublicApiTestState> = {}): Env & { __state: PublicApiTestState } {
-  const settings = { ...createDefaultAppSettings(), locale: "en-US" as const, timezone: "UTC" };
+  const settings = { ...createDefaultAppSettings(), localePreference: "en-US" as const, timezone: "UTC" };
   const state: PublicApiTestState = {
     users: [
       { id: USER_ID, banned: 0 },
@@ -387,6 +387,11 @@ describe("Cloudflare Public API", () => {
     expect(subscriptionsBody.subscriptions).toHaveLength(1);
     expect(subscriptionsBody.nextCursor).toEqual(expect.any(String));
     expect(subscriptionsBody.subscriptions[0]).not.toHaveProperty("user");
+    const nextSubscriptionsResponse = await publicApiSubscriptions(publicRequest(
+      `/api/public/v1/subscriptions?limit=1&cursor=${encodeURIComponent(subscriptionsBody.nextCursor ?? "")}`,
+    ), env);
+    const nextSubscriptionsBody = publicApiSubscriptionsListPayloadSchema.parse(await readSuccessData<unknown>(nextSubscriptionsResponse));
+    expect(nextSubscriptionsBody.subscriptions[0]?.id).not.toBe(subscriptionsBody.subscriptions[0]?.id);
 
     const allSubscriptionsResponse = await publicApiSubscriptions(publicRequest("/api/public/v1/subscriptions?limit=3"), env);
     const allSubscriptionsBody = publicApiSubscriptionsListPayloadSchema.parse(await readSuccessData<unknown>(allSubscriptionsResponse));

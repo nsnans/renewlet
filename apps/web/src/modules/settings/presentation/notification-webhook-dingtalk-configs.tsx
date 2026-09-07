@@ -34,7 +34,7 @@ export function NotificationWebhookConfigPanel({
     <>
       <div className="grid gap-4">
         <div className="grid gap-2">
-          <Label htmlFor="webhookUrl">Webhook URL</Label>
+          <Label htmlFor="webhookUrl">{t("settings.webhookUrlLabel")}</Label>
           <Input
             id="webhookUrl"
             name="webhookUrl"
@@ -203,7 +203,7 @@ export function NotificationDingTalkConfigPanel({
             value={settings.dingtalkContentTemplate}
             disabled={disabled}
             onChange={(e) => updateSetting('dingtalkContentTemplate', e.target.value)}
-            className="min-h-[120px] border-border bg-secondary font-mono text-sm"
+            className="min-h-30 border-border bg-secondary font-mono text-sm"
           />
           <p className="text-xs text-muted-foreground">{t("settings.dingtalkTemplateHelp")}</p>
           <Popover open={templateExamplesOpen} onOpenChange={setTemplateExamplesOpen}>

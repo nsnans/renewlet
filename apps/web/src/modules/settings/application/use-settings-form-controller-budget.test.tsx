@@ -38,8 +38,8 @@ const mocks = vi.hoisted(() => ({
   setTheme: vi.fn(),
   clearThemeModeOverride: vi.fn(),
   theme: "dark",
-  commitLocale: vi.fn(),
-  syncRemoteLocale: vi.fn(),
+  commitLocalePreference: vi.fn(),
+  syncRemoteLocalePreference: vi.fn(),
   testConnection: vi.fn(),
   refetchNotificationHistory: vi.fn<() => Promise<void>>(),
   publicStatusPageStatus: { data: { enabled: false, pageUrl: undefined as string | undefined, showPrices: false }, isLoading: false },
@@ -91,6 +91,7 @@ vi.mock("@/hooks/use-report-exchange-rates", () => ({
     rates: {},
     activeProvider: "floatrates",
     loading: false,
+    isRefreshing: false,
     lastUpdated: null,
     refresh: mocks.refreshRates,
     error: null,
@@ -170,8 +171,8 @@ vi.mock("@/i18n/I18nProvider", () => {
   return {
     useI18n: () => ({
       t: (key: string) => messages[key] ?? key,
-      commitLocale: mocks.commitLocale,
-      syncRemoteLocale: mocks.syncRemoteLocale,
+      commitLocalePreference: mocks.commitLocalePreference,
+      syncRemoteLocalePreference: mocks.syncRemoteLocalePreference,
     }),
   };
 });
@@ -243,8 +244,8 @@ describe("useSettingsFormController monthly budget input", () => {
     mocks.setTheme.mockReset();
     mocks.clearThemeModeOverride.mockReset();
     mocks.theme = "dark";
-    mocks.commitLocale.mockReset();
-    mocks.syncRemoteLocale.mockReset();
+    mocks.commitLocalePreference.mockReset();
+    mocks.syncRemoteLocalePreference.mockReset();
     localStorage.removeItem(APPEARANCE_PENDING_STORAGE_KEY);
     localStorage.removeItem(SETTINGS_APPEARANCE_PENDING_STORAGE_KEY);
     localStorage.removeItem(SETTINGS_THEME_MODE_STORAGE_KEY);
@@ -258,7 +259,7 @@ describe("useSettingsFormController monthly budget input", () => {
     mocks.appStatus = { setupRequired: false, setupEnabled: true, demoMode: false, turnstile: { enabled: false, siteKey: "" }, isLoading: false };
     mocks.updateSettingsMutateAsync.mockImplementation(async (command: SettingsMutationCommand) => settingsMutationResult(command));
     mocks.saveConfig.mockImplementation(async (config: CustomConfig) => config);
-    mocks.refreshRates.mockResolvedValue(undefined);
+    mocks.refreshRates.mockResolvedValue({ status: "succeeded", warning: null });
   });
 
   afterEach(() => {

@@ -4,7 +4,7 @@
  * 架构位置：列表、仪表盘和日历共用这一份只读详情，编辑仍交回页面级 CRUD 控制器。
  * 注意：金额、周期、状态和提醒标签必须继续复用订阅 domain 常量，避免不同入口展示口径分叉。
  */
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { CalendarPlus, Edit2, ExternalLink, RotateCw } from "lucide-react";
 import type { Subscription, SubscriptionCollectionItem } from "@/types/subscription";
 import {
@@ -30,8 +30,14 @@ import { useMediaQuery } from "@/hooks/use-media-query";
 import { useSettings } from "@/hooks/use-settings";
 import { useI18n } from "@/i18n/I18nProvider";
 import { cn } from "@/lib/utils";
+import { formatCompactCurrencyAmount } from "@/lib/currency";
 import type { DateOnly } from "@/lib/time/date-only";
-import { formatBillingCycleLabel, isOneTimeBuyout, isOneTimeFixedTerm } from "@/lib/subscription-billing";
+import {
+  formatBillingCycleLabel,
+  isOneTimeBuyout,
+  isOneTimeFixedTerm,
+  projectSubscriptionDailyCost,
+} from "@/lib/subscription-billing";
 import {
   getSubscriptionPriceReference,
   type SubscriptionCurrencyConverter,
@@ -60,6 +66,8 @@ interface SubscriptionDetailContentProps {
   subscription: Subscription | null;
   loading: boolean;
   loadingPreview: SubscriptionCollectionItem | null;
+  categoryLabel: string;
+  paymentMethodLabel: string | undefined;
   today: DateOnly | string;
   onClose: () => void;
   onEditSubscription?: (subscription: Subscription) => void;
@@ -89,15 +97,16 @@ function DetailRow({
 
 function resolveDetailLoadingStructure(
   preview: SubscriptionCollectionItem | null,
+  today: DateOnly | string,
 ): SubscriptionDetailLoadingStructure {
-  const buyout = preview?.billingCycle === "one-time"
-    && !("oneTimeTermCount" in preview && typeof preview.oneTimeTermCount === "number");
+  const buyout = preview !== null && isOneTimeBuyout(preview);
   return {
     showCalendarAction: preview !== null && !buyout,
     showCostSharing: preview?.costSharing?.enabled === true,
+    showDailyAverage: preview !== null && projectSubscriptionDailyCost(preview.price, preview, today) !== null,
     showNextBillingDate: preview !== null && (!buyout || preview.startDate !== null),
     showPaymentMethod: Boolean(preview?.paymentMethod),
-    showStartDate: preview?.startDate !== null && preview?.startDate !== undefined,
+    showStartDate: !buyout && preview?.startDate !== null && preview?.startDate !== undefined,
     showTrialEndDate: preview?.trialEndDate !== undefined,
   };
 }
@@ -106,6 +115,8 @@ function SubscriptionDetailContent({
   subscription,
   loading,
   loadingPreview,
+  categoryLabel,
+  paymentMethodLabel,
   today,
   onClose,
   onEditSubscription,
@@ -115,12 +126,11 @@ function SubscriptionDetailContent({
   currencyRatesReady,
   priceReferenceCurrency,
 }: SubscriptionDetailContentProps) {
-  const { config } = useCustomConfigState();
   const { data: settings } = useSettings();
-  const { t, locale, label, formatDateOnly, formatCurrency } = useI18n();
+  const { t, locale, formatDateOnly, formatCurrency } = useI18n();
   if (loading) {
     const loadingSlots = createSubscriptionDetailLoadingSlots({
-      structure: resolveDetailLoadingStructure(loadingPreview),
+      structure: resolveDetailLoadingStructure(loadingPreview, today),
       canEdit: Boolean(onEditSubscription),
       canRenew: Boolean(
         loadingPreview
@@ -132,23 +142,17 @@ function SubscriptionDetailContent({
     return (
       <SubscriptionDetailScaffold
         {...loadingSlots}
-        className="min-h-96 content-start"
         data-testid="subscription-detail-data-loading"
       />
     );
   }
   if (!subscription) return null;
 
-  const category = config.categories.find((item) => item.value === subscription.category);
-  const paymentMethod = subscription.paymentMethod
-    ? config.paymentMethods.find((item) => item.value === subscription.paymentMethod)
-    : undefined;
-  const categoryColor = category?.color ?? DEFAULT_LOGO_FALLBACK_COLOR;
   const effectiveStatus = getEffectiveSubscriptionStatus(subscription, today);
   const inheritedReminderDays = settings?.notificationReminderDays ?? DEFAULT_NOTIFICATION_REMINDER_DAYS;
   const isBuyout = isOneTimeBuyout(subscription);
   const isFixedTermOneTime = isOneTimeFixedTerm(subscription);
-  const isOneTime = subscription.billingCycle === "one-time";
+  const dailyCost = projectSubscriptionDailyCost(subscription.price, subscription, today);
   const canManualRenew = Boolean(onRenewSubscription) && isManualRenewEligible(subscription);
   const costSharingSummary = calculateCostSharingSummary(subscription.costSharing, subscription.price, {
     baseCurrency: subscription.currency,
@@ -166,8 +170,10 @@ function SubscriptionDetailContent({
     : t("subscription.priceReference", {
         amount: formatCurrency(priceReference.amount, priceReference.currency),
       });
-  const renewalLabel = isOneTime
-    ? t("subscription.renewal.oneTime")
+  const renewalLabel = isBuyout
+    ? t("subscription.oneTimeMode.buyout")
+    : isFixedTermOneTime
+      ? t("subscription.oneTimeMode.term")
     : subscription.autoRenew
       ? t("subscription.renewal.auto")
       : t("subscription.renewal.manual");
@@ -192,22 +198,6 @@ function SubscriptionDetailContent({
 
   return (
     <SubscriptionDetailScaffold
-      identity={(
-        <>
-          <SubscriptionLogo
-            name={subscription.name}
-            logo={subscription.logo}
-            fallbackColor={categoryColor}
-            size="md"
-          />
-          <div className="min-w-0 flex-1">
-            <h2 className="truncate text-xl font-semibold text-foreground">{subscription.name}</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {category ? label(category.labels) : subscription.category}
-            </p>
-          </div>
-        </>
-      )}
       summary={(
         <>
           <div className="min-w-0">
@@ -228,6 +218,15 @@ function SubscriptionDetailContent({
       )}
       facts={(
         <>
+          {dailyCost !== null ? (
+            <DetailRow label={t(dailyCost.basis === "ownership-to-date"
+              ? "subscription.detail.dailyCostToDate"
+              : "subscription.detail.dailyAverage")}>
+              <span className="tabular-nums">
+                {formatCompactCurrencyAmount(dailyCost.amount, subscription.currency, locale)}
+              </span>
+            </DetailRow>
+          ) : null}
           {costSharingSummary.enabled ? (
             <div className="grid gap-2 rounded-lg border border-border bg-secondary/40 p-3">
               <DetailRow label={t("subscription.field.price")}>
@@ -245,11 +244,11 @@ function SubscriptionDetailContent({
             </div>
           ) : null}
           <DetailRow label={t("subscription.detail.category")}>
-            <span className="wrap-break-word">{category ? label(category.labels) : subscription.category}</span>
+            <span className="wrap-break-word">{categoryLabel}</span>
           </DetailRow>
           {subscription.paymentMethod ? (
             <DetailRow label={t("subscription.field.paymentMethod")}>
-              <span className="wrap-break-word">{paymentMethod ? label(paymentMethod.labels) : subscription.paymentMethod}</span>
+              <span className="wrap-break-word">{paymentMethodLabel ?? subscription.paymentMethod}</span>
             </DetailRow>
           ) : null}
           {isBuyout ? (
@@ -263,7 +262,7 @@ function SubscriptionDetailContent({
               {formatDateOnly(subscription.nextBillingDate, "full")}
             </DetailRow>
           )}
-          {subscription.startDate ? (
+          {subscription.startDate && !isBuyout ? (
             <DetailRow label={t("subscription.detail.startDate")}>
               {formatDateOnly(subscription.startDate, "full")}
             </DetailRow>
@@ -276,8 +275,8 @@ function SubscriptionDetailContent({
           <DetailRow label={t("subscription.detail.reminder")}>
             {reminderLabel}
           </DetailRow>
-          <DetailRow label={t("subscription.detail.renewalType")}>
-            <Badge variant={isOneTime ? "secondary" : subscription.autoRenew ? "outline" : "secondary"} className="w-fit sm:ml-auto">
+          <DetailRow label={t("subscription.detail.paymentType")}>
+            <Badge variant={subscription.billingCycle === "one-time" ? "secondary" : subscription.autoRenew ? "outline" : "secondary"} className="w-fit sm:ml-auto">
               {renewalLabel}
             </Badge>
           </DetailRow>
@@ -317,7 +316,7 @@ function SubscriptionDetailContent({
           {subscription.notes ? (
             <div className="grid gap-2 border-t border-border pt-3">
               <p className="text-sm text-muted-foreground">{t("subscription.field.notes")}</p>
-              <div className="max-h-48 overflow-y-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-border bg-secondary/40 p-3 text-sm leading-6 text-foreground">
+              <div className="whitespace-pre-wrap wrap-break-word rounded-lg border border-border bg-secondary/40 p-3 text-sm leading-6 text-foreground">
                 {subscription.notes}
               </div>
             </div>
@@ -374,17 +373,55 @@ export function SubscriptionDetailDialog({
   loading,
 }: SubscriptionDetailDialogProps) {
   const isMobile = useMediaQuery("(max-width: 639px)");
-  const { t } = useI18n();
+  const { config } = useCustomConfigState();
+  const { t, label } = useI18n();
+  const detailTitleRef = useRef<HTMLHeadingElement>(null);
+  const detailFocusSessionRef = useRef(false);
+  const detailClosingRef = useRef(false);
+  const detailRestoreFocusRef = useRef<HTMLElement | null>(null);
+  const suppressDetailFocusRestoreRef = useRef(false);
   const [showAddToCalendarDialog, setShowAddToCalendarDialog] = useState(false);
   const [calendarSubscription, setCalendarSubscription] = useState<Subscription | null>(null);
   const titleSubscription = subscription ?? loadingPreview;
+  const title = titleSubscription?.name ?? t("subscription.detailFallbackTitle");
   const description = titleSubscription
     ? t("subscription.detailDescription", { name: titleSubscription.name })
     : t("subscription.detailFallbackDescription");
-  const closeDetail = () => onOpenChange(false);
+  const category = titleSubscription
+    ? config.categories.find((item) => item.value === titleSubscription.category)
+    : undefined;
+  const categoryLabel = titleSubscription
+    ? category ? label(category.labels) : titleSubscription.category
+    : null;
+  const paymentMethod = subscription?.paymentMethod
+    ? config.paymentMethods.find((item) => item.value === subscription.paymentMethod)
+    : undefined;
+  const paymentMethodLabel = subscription?.paymentMethod
+    ? paymentMethod ? label(paymentMethod.labels) : subscription.paymentMethod
+    : undefined;
+  const headerLogo = titleSubscription ? (
+    <SubscriptionLogo
+      name={titleSubscription.name}
+      logo={titleSubscription.logo}
+      fallbackColor={category?.color ?? DEFAULT_LOGO_FALLBACK_COLOR}
+      size="md"
+    />
+  ) : null;
+  const headerDescription = categoryLabel ? (
+    <>
+      <span aria-hidden="true" className="min-w-0 wrap-break-word">{categoryLabel}</span>
+      <span className="sr-only">{description}</span>
+    </>
+  ) : description;
+  const handleDetailOpenChange = (nextOpen: boolean) => {
+    detailClosingRef.current = !nextOpen;
+    onOpenChange(nextOpen);
+  };
+  const closeDetail = () => handleDetailOpenChange(false);
   const openAddToCalendar = () => {
     if (!subscription) return;
     // 添加到日历会先关闭详情；保留当前订阅快照，避免父级关闭动画清理 selected id 后子弹窗丢数据。
+    suppressDetailFocusRestoreRef.current = true;
     setCalendarSubscription(subscription);
     setShowAddToCalendarDialog(true);
     closeDetail();
@@ -395,33 +432,74 @@ export function SubscriptionDetailDialog({
       setCalendarSubscription(null);
     }
   };
+  const editFromDetail = (nextSubscription: Subscription) => {
+    suppressDetailFocusRestoreRef.current = true;
+    onEditSubscription?.(nextSubscription);
+  };
   const detailContent = loading || subscription ? (
     <SubscriptionDetailContent
       subscription={subscription}
       loading={loading === true}
       loadingPreview={loadingPreview}
+      categoryLabel={categoryLabel ?? ""}
+      paymentMethodLabel={paymentMethodLabel}
       today={today}
       onClose={closeDetail}
       onAddToCalendar={openAddToCalendar}
       currencyConvert={currencyConvert}
       currencyRatesReady={currencyRatesReady}
       priceReferenceCurrency={priceReferenceCurrency}
-      {...(onEditSubscription ? { onEditSubscription } : {})}
+      {...(onEditSubscription ? { onEditSubscription: editFromDetail } : {})}
       {...(onRenewSubscription ? { onRenewSubscription } : {})}
     />
   ) : null;
+  // 受控 Root 没有 Trigger 引用；每次打开会话只保存一次真实入口，切换 modal 时则禁止焦点回跳背景。
+  const captureDetailRestoreFocus = () => {
+    if (detailFocusSessionRef.current) return;
+    detailFocusSessionRef.current = true;
+    detailClosingRef.current = false;
+    suppressDetailFocusRestoreRef.current = false;
+    detailRestoreFocusRef.current = document.activeElement instanceof HTMLElement
+      && document.activeElement !== document.body
+      ? document.activeElement
+      : null;
+  };
+  const handleOpenAutoFocus = (event: Event) => {
+    captureDetailRestoreFocus();
+    if (!detailTitleRef.current) return;
+    // 长详情的首个交互项可能位于正文或 footer；焦点落到标题才能保证打开时仍从顶部开始阅读。
+    event.preventDefault();
+    detailTitleRef.current.focus();
+  };
+  const handleCloseAutoFocus = (event: Event) => {
+    event.preventDefault();
+    // 响应式形态切换也会卸载 Content；只有 Root 发出的真实关闭才能结束会话并恢复入口。
+    if (!detailClosingRef.current) return;
+    detailClosingRef.current = false;
+    detailFocusSessionRef.current = false;
+    const shouldRestoreFocus = !suppressDetailFocusRestoreRef.current;
+    suppressDetailFocusRestoreRef.current = false;
+    const restoreTarget = detailRestoreFocusRef.current;
+    detailRestoreFocusRef.current = null;
+    if (shouldRestoreFocus && restoreTarget?.isConnected) restoreTarget.focus();
+  };
 
   return (
     <>
       {isMobile ? (
-        <MobileDrawerRoot open={open} onOpenChange={onOpenChange} shouldScaleBackground={false}>
+        <MobileDrawerRoot open={open} onOpenChange={handleDetailOpenChange} shouldScaleBackground={false}>
           {open ? (
             <MobileBottomDrawerContent
-              title={titleSubscription?.name ?? t("subscription.detailFallbackTitle")}
-              description={description}
-              descriptionMode="sr-only"
+              title={title}
+              description={headerDescription}
+              descriptionMode={categoryLabel ? "visible" : "sr-only"}
               closeLabel={t("common.close")}
-              className="max-h-[calc(var(--app-viewport-height)-1rem)]"
+              icon={headerLogo}
+              className="h-[calc(var(--app-viewport-height)-1rem)]"
+              headerClassName="shrink-0 border-b border-border pb-4"
+              bodyClassName={null}
+              onOpenAutoFocus={captureDetailRestoreFocus}
+              onCloseAutoFocus={handleCloseAutoFocus}
               aria-busy={loading ? true : undefined}
             >
               {detailContent}
@@ -429,20 +507,29 @@ export function SubscriptionDetailDialog({
           ) : null}
         </MobileDrawerRoot>
       ) : (
-        <Dialog open={open} onOpenChange={onOpenChange}>
+        <Dialog open={open} onOpenChange={handleDetailOpenChange}>
           <DialogContent
-            className="max-h-[calc(var(--app-viewport-height)-3rem)] overflow-hidden border-border bg-card p-0 sm:max-w-lg"
+            layout="frame"
+            closeLabel={t("common.close")}
+            className="h5-dialog-frame gap-0 overflow-hidden border-border bg-card p-0 sm:max-w-lg"
+            onOpenAutoFocus={handleOpenAutoFocus}
+            onCloseAutoFocus={handleCloseAutoFocus}
             aria-busy={loading ? true : undefined}
           >
-            <div className="grid min-h-0 gap-4 overflow-y-auto p-6">
-              <DialogHeader>
-                <DialogTitle className="sr-only">
-                  {titleSubscription?.name ?? t("subscription.detailFallbackTitle")}
-                </DialogTitle>
-                <DialogDescription className="sr-only">{description}</DialogDescription>
-              </DialogHeader>
-              {detailContent}
-            </div>
+            <DialogHeader className="shrink-0 border-b border-border px-6 py-5 pr-14 text-left">
+              <div className="flex min-w-0 items-start gap-3">
+                {headerLogo ? <span aria-hidden="true" className="shrink-0">{headerLogo}</span> : null}
+                <div className="min-w-0 flex-1">
+                  <DialogTitle ref={detailTitleRef} tabIndex={-1} className="truncate text-xl outline-none">
+                    {title}
+                  </DialogTitle>
+                  <DialogDescription className={categoryLabel ? "mt-1 min-w-0 wrap-break-word text-left leading-5" : "sr-only"}>
+                    {headerDescription}
+                  </DialogDescription>
+                </div>
+              </div>
+            </DialogHeader>
+            {detailContent}
           </DialogContent>
         </Dialog>
       )}

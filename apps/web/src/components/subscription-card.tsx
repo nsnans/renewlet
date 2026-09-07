@@ -16,16 +16,15 @@ import {
   DEFAULT_NOTIFICATION_REMINDER_DAYS,
   DISABLED_REMINDER_DAYS,
   INHERIT_REMINDER_DAYS,
-  CYCLE_LABELS,
   type SubscriptionCollectionItem,
 } from '@/types/subscription';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { colorWithAlpha } from '@/lib/color';
-import { Calendar, MoreHorizontal, CalendarClock, Bell, CreditCard, CalendarPlus, Copy, Eye, EyeOff, Pencil, Pin, PinOff, RotateCw, Trash2 } from 'lucide-react';
+import { Calendar, MoreHorizontal, CalendarClock, Bell, CreditCard, CalendarPlus, Copy, Eye, EyeOff, Gauge, Pencil, Pin, PinOff, RotateCw, Trash2 } from 'lucide-react';
 import {
   daysBetweenDateOnly,
-  todayDateOnlyInTimeZone,
+  type DateOnly,
 } from '@/lib/time/date-only';
 import { getEffectiveSubscriptionStatus } from '@/modules/subscriptions/domain/subscription-status';
 import {
@@ -50,10 +49,15 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useI18n } from '@/i18n/I18nProvider';
-import { localizedLabel } from '@/i18n/locales';
 import { SubscriptionLogo } from '@/components/subscription-logo';
 import { SubscriptionStatusBadge } from '@/components/subscription-status-badge';
-import { formatBillingCycleLabel, isOneTimeBuyout, isOneTimeFixedTerm } from '@/lib/subscription-billing';
+import { formatCompactCurrencyAmount } from '@/lib/currency';
+import {
+  formatBillingCycleLabel,
+  isOneTimeBuyout,
+  isOneTimeFixedTerm,
+  projectSubscriptionDailyCost,
+} from '@/lib/subscription-billing';
 import {
   getSubscriptionPriceReference,
   type SubscriptionCurrencyConverter,
@@ -86,8 +90,8 @@ interface SubscriptionCardProps {
   onAddToCalendar?: (id: string) => void;
   /** 指针或键盘意图出现时预取完整详情，冷点击仍由 detail query 接管。 */
   onPrefetchDetails?: (id: string) => void;
-  /** 用户 IANA 时区，用于续费/试用提示窗口。 */
-  timeZone: string;
+  /** 页面级账号业务日期；所有可见卡片在跨午夜时一起刷新。 */
+  today: DateOnly | string;
   /** 分类配置查找表由页面级容器构建，避免虚拟列表 item 重复订阅全局配置。 */
   categoryByValue: SubscriptionCardLookup;
   /** 支付方式配置查找表由页面级容器构建，避免可见行滚动时重复查找全局配置。 */
@@ -106,27 +110,31 @@ const DEFAULT_BADGE_COLOR = "hsl(var(--primary))";
 const CARD_ACTION_MENU_CONTENT_CLASSNAME = "pointer-events-auto w-max min-w-40";
 const CARD_ACTION_MENU_ITEM_CLASSNAME = "gap-2.5 px-2.5 py-2 text-sm whitespace-nowrap";
 
-type SubscriptionCardMetaTone = "muted" | "warning" | "destructive";
+type SubscriptionCardMetaTone = "muted" | "warning";
 
 type SubscriptionCardMetaItem = {
   key: string;
   icon: ReactNode;
   text: string;
   tone: SubscriptionCardMetaTone;
+  tabular?: boolean;
   truncate?: boolean;
 };
 
 const metaToneClassNames = {
   muted: "text-muted-foreground",
   warning: "text-warning",
-  destructive: "text-destructive",
 } satisfies Record<SubscriptionCardMetaTone, string>;
 
 function SubscriptionCardMetaToken({ item }: { item: SubscriptionCardMetaItem }) {
   return (
     <div
       data-testid={`subscription-card-meta-${item.key}`}
-      className={cn("inline-flex min-w-0 max-w-full items-center gap-1.5 whitespace-nowrap text-xs", metaToneClassNames[item.tone])}
+      className={cn(
+        "inline-flex min-w-0 max-w-full items-center gap-1.5 whitespace-nowrap text-xs",
+        item.tabular && "tabular-nums",
+        metaToneClassNames[item.tone],
+      )}
     >
       {item.icon}
       <span className={cn(item.truncate ? "block max-w-24 truncate sm:max-w-32" : "whitespace-nowrap")}>{item.text}</span>
@@ -167,7 +175,7 @@ function SubscriptionCardComponent({
   onViewDetails,
   onAddToCalendar,
   onPrefetchDetails,
-  timeZone,
+  today,
   categoryByValue,
   paymentMethodByValue,
   inheritedReminderDays = DEFAULT_NOTIFICATION_REMINDER_DAYS,
@@ -186,12 +194,11 @@ function SubscriptionCardComponent({
   };
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
-  const today = todayDateOnlyInTimeZone(new Date(), timeZone);
   const daysUntilRenewal = daysBetweenDateOnly(today, subscription.nextBillingDate);
   const daysUntilTrialEnd = subscription.trialEndDate ? daysBetweenDateOnly(today, subscription.trialEndDate) : null;
-  const isOneTime = subscription.billingCycle === "one-time";
   const isBuyout = isOneTimeBuyout(subscription);
   const isFixedTermOneTime = isOneTimeFixedTerm(subscription);
+  const dailyCost = projectSubscriptionDailyCost(subscription.price, subscription, today);
   const hasCalendarEvent = !isBuyout;
   const canManualRenew = Boolean(onRenew) && isManualRenewEligible(subscription);
   const billingCycleLabel = formatBillingCycleLabel(subscription, locale);
@@ -211,16 +218,19 @@ function SubscriptionCardComponent({
     baseCurrency: subscription.currency,
     convert: currencyConvert,
   });
-  const renewalBadgeLabel = isOneTime
-    ? localizedLabel(CYCLE_LABELS["one-time"], locale)
+  const renewalBadgeLabel = isBuyout
+    ? t("subscription.oneTimeMode.buyout")
+    : isFixedTermOneTime
+      ? t("subscription.oneTimeMode.term")
     : subscription.autoRenew
       ? t("subscription.renewal.auto")
       : t("subscription.renewal.manual");
   // 卡片是用户最先看到的状态入口，必须用有效状态，避免旧 active/trial 过期数据同时显示“活跃”和“即将续费”。
   const effectiveStatus = getEffectiveSubscriptionStatus(subscription, today);
   const isExpired = effectiveStatus === "expired";
+  const isInactive = isExpired || effectiveStatus === "paused" || effectiveStatus === "cancelled";
   // 这里是展示提示窗口，不等同于 Cron 通知窗口；不要把两者的阈值混用。
-  const isRenewingSoon = !isExpired && !isBuyout && daysUntilRenewal <= 7 && daysUntilRenewal >= 0;
+  const isRenewingSoon = !isInactive && !isBuyout && daysUntilRenewal <= 7 && daysUntilRenewal >= 0;
   const isTrialEndingSoon = !isExpired && subscription.status === 'trial' && daysUntilTrialEnd !== null &&
     daysUntilTrialEnd <= 3 && daysUntilTrialEnd >= 0;
   const billingDateText = isBuyout && subscription.startDate
@@ -251,7 +261,7 @@ function SubscriptionCardComponent({
       ? t("subscription.card.renewsToday")
       : t("subscription.card.renewsInDays", { days: daysUntilRenewal });
   })();
-  const billingStatusTone: SubscriptionCardMetaTone = isExpired ? "destructive" : isRenewingSoon ? "warning" : "muted";
+  const billingStatusTone: SubscriptionCardMetaTone = isRenewingSoon ? "warning" : "muted";
   const paymentConfig = subscription.paymentMethod ? paymentMethodByValue.get(subscription.paymentMethod) : undefined;
   const paymentMethodLabel = subscription.paymentMethod
     ? paymentConfig
@@ -259,7 +269,7 @@ function SubscriptionCardComponent({
       : subscription.paymentMethod
     : null;
   const metaItems: SubscriptionCardMetaItem[] = [
-    ...(subscription.startDate
+    ...(subscription.startDate && !isBuyout
       ? [{
           key: "start-date",
           icon: <CalendarClock className="h-3.5 w-3.5 shrink-0" />,
@@ -273,6 +283,19 @@ function SubscriptionCardComponent({
           icon: <Calendar className="h-3.5 w-3.5 shrink-0" />,
           text: billingDateText,
           tone: "muted" as const,
+        }]
+      : []),
+    ...(dailyCost !== null
+      ? [{
+          key: "daily-average",
+          icon: <Gauge className="h-3.5 w-3.5 shrink-0" />,
+          text: t(dailyCost.basis === "ownership-to-date"
+            ? "subscription.card.dailyCostToDate"
+            : "subscription.card.dailyAverage", {
+            amount: formatCompactCurrencyAmount(dailyCost.amount, subscription.currency, locale),
+          }),
+          tone: "muted" as const,
+          tabular: true,
         }]
       : []),
     ...(paymentMethodLabel
@@ -324,7 +347,7 @@ function SubscriptionCardComponent({
       className={cn(
         "group relative h-full overflow-hidden rounded-xl border border-border bg-card p-5 shadow-card transition-all duration-300 hover:bg-card-hover",
         onViewDetails && "cursor-pointer",
-        isExpired && "border-destructive/40",
+        isInactive && "border-muted bg-muted/20 hover:bg-muted/30",
         isRenewingSoon && "border-warning/40",
         isTrialEndingSoon && "animate-pulse-glow"
       )}
@@ -456,7 +479,7 @@ function SubscriptionCardComponent({
               </span>
               <Badge
                 data-testid="subscription-card-badge-renewal"
-                variant={isOneTime ? "secondary" : subscription.autoRenew ? "outline" : "secondary"}
+                variant={isBuyout || isFixedTermOneTime ? "secondary" : subscription.autoRenew ? "outline" : "secondary"}
                 className="shrink-0 whitespace-nowrap px-2 text-xs sm:px-2.5"
               >
                 {renewalBadgeLabel}
@@ -516,7 +539,7 @@ function areSubscriptionCardPropsEqual(prev: SubscriptionCardProps, next: Subscr
   return (
     prev.subscription === next.subscription &&
     (prev.viewMode ?? "grid") === (next.viewMode ?? "grid") &&
-    prev.timeZone === next.timeZone &&
+    prev.today === next.today &&
     prev.inheritedReminderDays === next.inheritedReminderDays &&
     prev.categoryByValue === next.categoryByValue &&
     prev.paymentMethodByValue === next.paymentMethodByValue &&

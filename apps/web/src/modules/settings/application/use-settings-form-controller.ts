@@ -101,6 +101,7 @@ export function useSettingsFormController(): SettingsFormController {
     rates,
     activeProvider: activeRateProvider,
     loading: ratesLoading,
+    isRefreshing: ratesRefreshing,
     lastUpdated,
     refresh: refreshRates,
     error: ratesError,
@@ -109,7 +110,8 @@ export function useSettingsFormController(): SettingsFormController {
     reportBasisStatus,
     getCurrencySymbol,
   } = useReportExchangeRates(savedSettings.exchangeRateProvider);
-  const { t, commitLocale, syncRemoteLocale } = useI18n();
+  const ratesRefreshPending = ratesLoading || ratesRefreshing;
+  const { t, commitLocalePreference, syncRemoteLocalePreference } = useI18n();
   const appStatus = useSetupStatus();
   const externalIntegrationsDisabled = appStatus.isLoading || appStatus.demoMode;
   // demo 模式同时禁用外部集成和账号安全写操作；这里拆成两个语义，避免后续把密码/MFA/Passkey 误归到外部集成策略里。
@@ -300,8 +302,10 @@ export function useSettingsFormController(): SettingsFormController {
   }, []);
 
   const handleRefreshRates = useCallback(async () => {
-    await refreshRates(savedSettings.exchangeRateProvider);
-    toast.success(t("settings.ratesUpdated"));
+    const result = await refreshRates(savedSettings.exchangeRateProvider);
+    if (result.status === "succeeded") {
+      toast.success(t("exchangeRates.updated"));
+    }
   }, [refreshRates, savedSettings.exchangeRateProvider, t]);
 
   const handleUpdateCurrencies = useCallback(
@@ -338,14 +342,15 @@ export function useSettingsFormController(): SettingsFormController {
         clearSettingsAppearanceDraftFromStorage();
       }
       if (options.rememberLocalePreference) {
-        commitLocale(nextSettings.locale);
+        commitLocalePreference(nextSettings.localePreference);
       } else {
-        syncRemoteLocale(nextSettings.locale);
+        syncRemoteLocalePreference(nextSettings.localePreference);
       }
     },
-    [commitLocale, setTheme, syncRemoteLocale],
+    [commitLocalePreference, setTheme, syncRemoteLocalePreference],
   );
 
+  // 保存失败使用完整远端基线驱动预览回滚，因此回调必须依赖整个 savedSettings 快照，不能按当前字段手工拆分。
   const handleSaveChanges = useCallback(async () => {
     if (isSavingSettings || !hasUnsavedChanges) return;
     if (monthlyBudgetError) {
@@ -357,7 +362,7 @@ export function useSettingsFormController(): SettingsFormController {
     const shouldSaveSettings = settingsDirty;
     const shouldSaveCustomConfig = customConfigDirty;
     const providerChanged = settings.exchangeRateProvider !== savedSettings.exchangeRateProvider;
-    const localeChanged = settings.locale !== savedSettings.locale;
+    const localeChanged = settings.localePreference !== savedSettings.localePreference;
     const appearanceChanged = settings.themeMode !== savedSettings.themeMode
       || settings.themeVariant !== savedSettings.themeVariant
       || !areJsonSnapshotsEqual(settings.themeCustomColor, savedSettings.themeCustomColor);
@@ -392,16 +397,17 @@ export function useSettingsFormController(): SettingsFormController {
         // Bot 命令安装状态读取的是已保存凭据；保存 token/chat 后要主动刷新，不能等低频 query 自然过期。
         void refetchTelegramBotCommands();
         if (providerChanged) {
-          try {
-            // 汇率刷新必须使用服务端已接受的 provider；草稿值可能因后端旧版本或保存失败没有真正生效。
-            await refreshRates(saved.exchangeRateProvider);
-          } catch (e) {
-            console.warn("Failed to refresh exchange rates after saving settings:", e);
-          }
+          // 汇率刷新必须使用服务端已接受的 provider；草稿值可能因后端旧版本或保存失败没有真正生效。
+          void refreshRates(saved.exchangeRateProvider);
         }
       } else if (settingsResult.status === "rejected") {
         failedScopes.push(t("settings.appSettingsScope"));
         firstError = settingsResult.reason;
+        // 保存失败仍通过 Provider request-id 状态机回滚，防止尚未完成的预览 catalog 迟到后重新覆盖远端事实。
+        if (localeChanged) {
+          setSettings((current) => ({ ...current, localePreference: savedSettings.localePreference }));
+        }
+        syncSavedPreviewState(savedSettings, { syncAppearance: appearanceChanged });
       }
 
       if (customConfigResult.status === "fulfilled" && customConfigResult.value) {
@@ -443,11 +449,7 @@ export function useSettingsFormController(): SettingsFormController {
     refetchNotificationHistory,
     refreshRates,
     saveConfig,
-    savedSettings.exchangeRateProvider,
-    savedSettings.locale,
-    savedSettings.themeCustomColor,
-    savedSettings.themeMode,
-    savedSettings.themeVariant,
+    savedSettings,
     settings,
     buildSecretUpdates,
     resetSecretDrafts,
@@ -547,7 +549,7 @@ export function useSettingsFormController(): SettingsFormController {
     categoryUsageCount,
     rates,
     activeRateProvider,
-    ratesLoading,
+    ratesRefreshPending,
     lastUpdated,
     ratesError,
     ratesErrorDetails,

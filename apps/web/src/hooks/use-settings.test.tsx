@@ -55,6 +55,10 @@ function settingsEnvelope(overrides: Partial<AppSettings> = {}): SettingsReadMod
   return { settings: settings(overrides), secretStatus: EMPTY_SETTINGS_SECRET_STATUS };
 }
 
+function normalizePersistedSettings(value: Record<string, unknown>): AppSettings {
+  return normalizeSettings({ localePreference: "auto", ...value });
+}
+
 describe("useSettings query contract", () => {
   beforeEach(() => {
     mocks.settingsGet.mockReset();
@@ -96,6 +100,21 @@ describe("useSettings query contract", () => {
     expect(queryClient.getQueryData<SettingsReadModel>(SETTINGS_QUERY_KEY)?.settings.defaultCurrency).toBe("USD");
   });
 
+  it("resets subscription collections when the account timezone changes", async () => {
+    const queryClient = createQueryClient();
+    queryClient.setQueryData(SETTINGS_QUERY_KEY, settingsEnvelope({ timezone: "UTC" }));
+    mocks.settingsUpdate.mockResolvedValue(settingsEnvelope({ timezone: "Asia/Shanghai" }));
+    const resetQueries = vi.spyOn(queryClient, "resetQueries");
+    const { result } = renderHook(() => useUpdateSettings(), { wrapper: createWrapper(queryClient) });
+
+    await act(async () => {
+      await result.current.mutateAsync({ timezone: "Asia/Shanghai" });
+    });
+
+    expect(resetQueries).toHaveBeenNthCalledWith(1, { queryKey: ["subscriptions", "collections", "page"] });
+    expect(resetQueries).toHaveBeenNthCalledWith(2, { queryKey: ["subscriptions", "collections", "index"] });
+  });
+
   it("refetches settings after explicit invalidation", async () => {
     const queryClient = createQueryClient();
     mocks.settingsGet
@@ -116,7 +135,7 @@ describe("useSettings query contract", () => {
 
 describe("normalizeSettings", () => {
   it("clears legacy Webhook example defaults so they stay placeholders only", () => {
-    const settings = normalizeSettings({
+    const settings = normalizePersistedSettings({
       webhookHeaders: WEBHOOK_HEADERS_PLACEHOLDER,
       webhookPayload: WEBHOOK_PAYLOAD_PLACEHOLDER,
     });
@@ -126,7 +145,7 @@ describe("normalizeSettings", () => {
   });
 
   it("defaults historical settings to Frankfurter as the exchange-rate provider", () => {
-    const settings = normalizeSettings({
+    const settings = normalizePersistedSettings({
       defaultCurrency: "USD",
     });
 
@@ -135,7 +154,7 @@ describe("normalizeSettings", () => {
   });
 
   it("fills missing global notification reminder days from defaults", () => {
-    const settings = normalizeSettings({
+    const settings = normalizePersistedSettings({
       defaultCurrency: "USD",
     });
 
@@ -143,7 +162,7 @@ describe("normalizeSettings", () => {
   });
 
   it("rejects invalid exchange-rate providers and falls back to defaults", () => {
-    const settings = normalizeSettings({
+    const settings = normalizePersistedSettings({
       exchangeRateProvider: "unknown",
     });
 
@@ -151,7 +170,7 @@ describe("normalizeSettings", () => {
   });
 
   it("keeps Frankfurter as a supported exchange-rate provider", () => {
-    const settings = normalizeSettings({
+    const settings = normalizePersistedSettings({
       exchangeRateProvider: "frankfurter",
     });
 
@@ -159,7 +178,7 @@ describe("normalizeSettings", () => {
   });
 
   it("fills missing built-in icon source settings from defaults", () => {
-    const settings = normalizeSettings({
+    const settings = normalizePersistedSettings({
       defaultCurrency: "USD",
       builtInIconSources: {
         thesvg: { enabled: false, variantsEnabled: false },
@@ -174,7 +193,7 @@ describe("normalizeSettings", () => {
   });
 
   it("fills missing online icon source settings from defaults", () => {
-    const settings = normalizeSettings({
+    const settings = normalizePersistedSettings({
       defaultCurrency: "USD",
       onlineIconSources: {
         appStore: { enabled: false },

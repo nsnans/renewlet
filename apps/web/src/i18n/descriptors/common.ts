@@ -3,6 +3,9 @@ import { msg } from "@lingui/core/macro";
 
 export const messages = [
   msg({ id: "app.tagline", message: "订阅管理助手" }),
+  msg({ id: "exchangeRates.refreshing", message: "刷新中..." }),
+  msg({ id: "exchangeRates.updated", message: "最新汇率数据已获取" }),
+  msg({ id: "exchangeRates.failedWithFallback", message: "汇率获取失败，当前使用备用汇率。{error}" }),
   msg({ id: "appError.title", message: "页面暂时无法显示" }),
   msg({ id: "appError.description", message: "发生了一个未预期的界面错误。你可以刷新页面重新加载，已保存的数据不会受到影响。" }),
   msg({ id: "appError.reload", message: "刷新页面" }),
@@ -96,6 +99,7 @@ export const messages = [
   msg({ id: "notFound.home", message: "返回首页" }),
   msg({ id: "locale.zhCN", message: "中文" }),
   msg({ id: "locale.enUS", message: "English" }),
+  msg({ id: "locale.auto", message: "跟随当前设备" }),
   msg({ id: "reminder.days", message: "提前 {days} 天" }),
   msg({ id: "time.hour", message: "时" }),
   msg({ id: "time.minute", message: "分" }),

@@ -1,6 +1,6 @@
 // Worker 公开展示页测试保护 bearer token、字段 allowlist、隐藏过滤和 R2 私有资产代理边界。
 import { createDefaultAppSettings } from "@renewlet/shared/settings-defaults";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readSuccessData } from "./api-test-helpers";
 import {
   createPublicStatusPage,
@@ -47,7 +47,7 @@ function d1Result<T = unknown>(results: T[]): D1Result<T> {
 
 function createEnv(overrides: Partial<PublicStatusTestState> = {}): Env {
   // public status 资产读取必须走 token -> owner -> 可见订阅引用 -> R2 object；mock 也保持这条链路。
-  const settings = { ...createDefaultAppSettings(), locale: "en-US" as const, timezone: "UTC" };
+  const settings = { ...createDefaultAppSettings(), localePreference: "en-US" as const, timezone: "UTC" };
   const state: PublicStatusTestState = {
     pages: [],
     subscriptions: [],
@@ -132,12 +132,18 @@ class PublicStatusTestStatement {
   }
 
   async all<T>(): Promise<D1Result<T>> {
-    if (this.sql.includes("FROM subscriptions")) {
-      const [userId, limit] = this.values as [string, number];
+    if (this.sql.includes("INNER JOIN subscriptions AS sub")) {
+      const [today, userId, limit] = this.values as [string, string, number];
+      const inactive = (row: SubscriptionRow) => {
+        if (row.status === "expired" || row.status === "paused" || row.status === "cancelled") return 1;
+        if (row.billing_cycle === "one-time" && !row.one_time_term_count) return 0;
+        return (row.status === "active" || row.status === "trial") && row.next_billing_date < today ? 1 : 0;
+      };
       const rows = this.state.subscriptions
         .filter((row) => row.user_id === userId && row.public_hidden === 0)
         .sort((left, right) => (
           right.pinned - left.pinned
+          || inactive(left) - inactive(right)
           || right.created_at.localeCompare(left.created_at)
           || right.id.localeCompare(left.id)
         ))
@@ -189,9 +195,9 @@ function authorizedRequest(path: string, init: RequestInit = {}): Request {
   });
 }
 
-function publicRequest(path: string): Request {
+function publicRequest(path: string, locale = "en-US"): Request {
   return new Request(`https://renewlet.test${path}`, {
-    headers: { "accept-language": "en-US" },
+    headers: { "accept-language": locale },
   });
 }
 
@@ -288,8 +294,15 @@ function r2Object(body: string, contentType: string): R2ObjectBody {
 }
 
 beforeEach(() => {
+  // 公开状态同时投影 asOf 与有效状态；固定 Date 才能让两者共享同一账号日界线。
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-06-07T12:00:00.000Z"));
   authMocks.requireAuth.mockReset();
   authMocks.requireAuth.mockResolvedValue({ user: { id: USER_ID }, session: { id: "ses" } });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("public status worker handlers", () => {
@@ -336,14 +349,15 @@ describe("public status worker handlers", () => {
     });
 
     const response = await readPublicStatus(publicRequest(`/api/public/status/${TOKEN}`), env, TOKEN);
-    const data = await readSuccessData<{ subscriptions: Array<Record<string, unknown>>; page: { showPrices: boolean; currency?: string } }>(response);
+    const data = await readSuccessData<{ subscriptions: Array<Record<string, unknown>>; page: { showPrices: boolean; asOf: string; currency?: string } }>(response);
 
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
     expect(data.page.showPrices).toBe(false);
+    expect(data.page.asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/u);
     expect(data.page).not.toHaveProperty("currency");
-    expect(data.subscriptions.map((item) => item["name"])).toEqual(["Pinned Plan", "Legacy Overdue", "Later Plan", "Visible Plan"]);
+    expect(data.subscriptions.map((item) => item["name"])).toEqual(["Pinned Plan", "Later Plan", "Visible Plan", "Legacy Overdue"]);
     expect(data.subscriptions.some((item) => item["name"] === "Hidden Plan")).toBe(false);
     expect(data.subscriptions.find((item) => item["name"] === "Legacy Overdue")).toMatchObject({ status: "expired" });
     expect(data.subscriptions[0]).toEqual(expect.objectContaining({
@@ -362,7 +376,13 @@ describe("public status worker handlers", () => {
     expect(data.subscriptions[0]).not.toHaveProperty("currency");
     expect(data.subscriptions[0]).not.toHaveProperty("billingCycle");
 
-    const pricedSettings = { ...createDefaultAppSettings(), locale: "en-US" as const, timezone: "UTC", publicStatusCurrency: "USD" as const };
+    const chineseResponse = await readPublicStatus(publicRequest(`/api/public/status/${TOKEN}`, "zh-CN"), env, TOKEN);
+    const chineseData = await readSuccessData<{ subscriptions: Array<Record<string, unknown>> }>(chineseResponse);
+    expect(chineseData.subscriptions[0]).toMatchObject({
+      category: { value: "developer_tools", label: "开发工具" },
+    });
+
+    const pricedSettings = { ...createDefaultAppSettings(), localePreference: "en-US" as const, timezone: "UTC", publicStatusCurrency: "USD" as const };
     const pricedEnv = createEnv({
       pages: [publicPage({ show_prices: 1 })],
       subscriptions: [subscriptionRow()],
@@ -384,6 +404,61 @@ describe("public status worker handlers", () => {
     });
   });
 
+  it("publishes buyout purchase dates without a future billing event or hidden price fields", async () => {
+    const env = createEnv({
+      pages: [publicPage()],
+      subscriptions: [subscriptionRow({
+        id: "sub_buyout",
+        name: "Lifetime License",
+        billing_cycle: "one-time",
+        one_time_term_count: null,
+        one_time_term_unit: null,
+        start_date: "2026-05-01",
+        next_billing_date: "2026-05-01",
+        auto_renew: 0,
+        auto_calculate_next_billing_date: 0,
+      })],
+    });
+
+    const response = await readPublicStatus(publicRequest(`/api/public/status/${TOKEN}`), env, TOKEN);
+    const data = await readSuccessData<{ subscriptions: Array<Record<string, unknown>> }>(response);
+    expect(data.subscriptions[0]).toMatchObject({
+      name: "Lifetime License",
+      startDate: "2026-05-01",
+      nextBillingDate: null,
+    });
+    expect(data.subscriptions[0]).not.toHaveProperty("price");
+    expect(data.subscriptions[0]).not.toHaveProperty("billingCycle");
+  });
+
+  it("normalizes historical non-positive terms to the priced buyout projection", async () => {
+    const env = createEnv({
+      pages: [publicPage({ show_prices: 1 })],
+      subscriptions: [subscriptionRow({
+        id: "sub_historical_buyout",
+        name: "Historical Lifetime License",
+        billing_cycle: "one-time",
+        one_time_term_count: -1,
+        one_time_term_unit: "month",
+        start_date: "2026-05-01",
+        next_billing_date: "2026-05-01",
+        auto_renew: 0,
+        auto_calculate_next_billing_date: 0,
+      })],
+    });
+
+    const response = await readPublicStatus(publicRequest(`/api/public/status/${TOKEN}`), env, TOKEN);
+    const data = await readSuccessData<{ subscriptions: Array<Record<string, unknown>> }>(response);
+    expect(data.subscriptions[0]).toMatchObject({
+      billingCycle: "one-time",
+      nextBillingDate: null,
+      price: "12",
+      currency: "USD",
+    });
+    expect(data.subscriptions[0]).not.toHaveProperty("oneTimeTermCount");
+    expect(data.subscriptions[0]).not.toHaveProperty("oneTimeTermUnit");
+  });
+
   it("returns null start dates for public recurring subscriptions with unknown starts", async () => {
     const env = createEnv({
       pages: [publicPage()],
@@ -398,7 +473,7 @@ describe("public status worker handlers", () => {
     });
 
     const response = await readPublicStatus(publicRequest(`/api/public/status/${TOKEN}`), env, TOKEN);
-    const data = await readSuccessData<{ subscriptions: Array<{ startDate: string | null; nextBillingDate: string }> }>(response);
+    const data = await readSuccessData<{ subscriptions: Array<{ startDate: string | null; nextBillingDate: string | null }> }>(response);
 
     expect(data.subscriptions[0]).toMatchObject({
       startDate: null,

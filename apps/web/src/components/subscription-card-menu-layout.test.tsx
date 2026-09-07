@@ -1,7 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { EXPLICIT_LOCALE_PREFERENCE_KEY } from "@/i18n/locales";
 import { assertDateOnly } from "@/lib/time/date-only";
 import type { Subscription } from "@/types/subscription";
 import { SubscriptionCard } from "./subscription-card";
@@ -42,7 +41,7 @@ function renderCard() {
     <TooltipProvider delayDuration={0}>
       <SubscriptionCard
         subscription={subscription}
-        timeZone="Asia/Shanghai"
+        today="2026-05-18"
         inheritedReminderDays={5}
         categoryByValue={new Map([
           ["hosting_domains", {
@@ -75,11 +74,14 @@ describe("SubscriptionCard menu layout", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-18T00:00:00.000Z"));
-    localStorage.setItem(EXPLICIT_LOCALE_PREFERENCE_KEY, "en-US");
+    Object.defineProperty(globalThis.navigator, "languages", { configurable: true, value: ["en-US"] });
+    Object.defineProperty(globalThis.navigator, "language", { configurable: true, value: "en-US" });
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    Object.defineProperty(globalThis.navigator, "languages", { configurable: true, value: ["zh-CN"] });
+    Object.defineProperty(globalThis.navigator, "language", { configurable: true, value: "zh-CN" });
   });
 
   it("keeps long English action labels on one line", () => {
