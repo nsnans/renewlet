@@ -344,6 +344,29 @@ test("a completed v3 marker verifies corruption and never silently rebuilds it",
   }
 });
 
+test("a completed v3 marker accepts public visibility updates without rewriting tag timestamps", async () => {
+  const client = openDerivedDatabase();
+  try {
+    await runBackfill(client, backfillNow);
+    const previousTagTimestamp = client.db.prepare(`SELECT updated_at FROM subscription_tags
+      WHERE user_id = 'usr_one' AND subscription_id = 'sub_one' AND tag_norm = 'work'`).get()?.["updated_at"];
+    client.db.exec(`
+      UPDATE subscriptions
+      SET public_hidden = 1, updated_at = '2026-08-24T13:00:00.000Z'
+      WHERE id = 'sub_one';
+      UPDATE subscription_list_index
+      SET public_hidden = 1, updated_at = '2026-08-24T13:00:00.000Z'
+      WHERE subscription_id = 'sub_one';
+    `);
+
+    await runBackfill(client, backfillNow);
+    assert.equal(client.db.prepare(`SELECT updated_at FROM subscription_tags
+      WHERE user_id = 'usr_one' AND subscription_id = 'sub_one' AND tag_norm = 'work'`).get()?.["updated_at"], previousTagTimestamp);
+  } finally {
+    client.db.close();
+  }
+});
+
 test("a completed v3 marker rejects a missing repeat schedule even when its aggregate was also cleared", async () => {
   const client = openDerivedDatabase();
   try {
@@ -372,6 +395,31 @@ test("a completed v3 marker rejects parseable scheduler instants that are not le
       WHERE user_id = 'usr_one'`).run();
 
     await assert.rejects(runBackfill(client, backfillNow), /stored occurrence invariant failed/);
+  } finally {
+    client.db.close();
+  }
+});
+
+test("a completed v3 marker accepts an empty user without a daily scheduler occurrence", async () => {
+  const client = openDerivedDatabase();
+  try {
+    await runBackfill(client, backfillNow);
+    client.db.exec(`
+      DELETE FROM subscriptions WHERE id = 'sub_two';
+      UPDATE subscription_user_stats
+      SET total_count = 0, trial_count = 0, active_count = 0, expired_count = 0, paused_count = 0, cancelled_count = 0
+      WHERE user_id = 'usr_two';
+      UPDATE subscription_scheduler_state
+      SET auto_renew_count = 0,
+          repeat_reminder_count = 0,
+          next_auto_renew_check_at_utc = NULL,
+          next_daily_notification_due_at_utc = NULL,
+          next_repeat_notification_due_at_utc = NULL
+      WHERE user_id = 'usr_two';
+    `);
+
+    await runBackfill(client, backfillNow);
+    assert.equal(markerCount(client.db, "subscription-derived-state-v3"), 1);
   } finally {
     client.db.close();
   }
